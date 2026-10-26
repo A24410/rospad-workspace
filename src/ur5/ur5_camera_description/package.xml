@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ur5_camera_description</name>
+  <version>0.1.0</version>
+  <description>UR5 robot description with wrist-mounted eye-in-hand camera for ROSpad simulation</description>
+  <maintainer email="nirav.robotics@gmail.com">Nirav</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>robot_state_publisher</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
