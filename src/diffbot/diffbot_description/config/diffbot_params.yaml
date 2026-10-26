@@ -1,0 +1,21 @@
+# DiffBot physical parameters
+diffbot:
+  wheel_radius: 0.065       # metres
+  wheel_base:   0.24        # metres (distance between wheel centres)
+  max_linear_vel:  1.0      # m/s
+  max_angular_vel: 2.0      # rad/s
+
+# Joint limits
+joint_limits:
+  left_wheel_joint:
+    has_position_limits: false
+    has_velocity_limits: true
+    max_velocity: 10.0      # rad/s
+    has_effort_limits: true
+    max_effort: 10.0        # N·m
+  right_wheel_joint:
+    has_position_limits: false
+    has_velocity_limits: true
+    max_velocity: 10.0
+    has_effort_limits: true
+    max_effort: 10.0
