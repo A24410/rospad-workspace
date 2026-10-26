@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>diffbot_description</name>
+  <version>0.1.0</version>
+  <description>DiffBot differential-drive robot description for ROSpad simulation</description>
+  <maintainer email="nirav.robotics@gmail.com">Nirav</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>joint_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>xacro</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
