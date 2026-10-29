@@ -56,28 +56,7 @@ class ColorTracker(Node):
             twist.angular.z = 0.4
             if self._frame_count % 20 == 0:
                 self.get_logger().info(f'Searching... (red pixels: {red_count})')
-        else:
-            # Find centroid of red region
-            ys, xs = np.where(red_mask)
-            cx = float(np.mean(xs))
-            cy = float(np.mean(ys))
 
-            # Normalise centroid: -1 (left) to +1 (right)
-            offset = (cx - w / 2.0) / (w / 2.0)
-
-            # Target area (fraction of image covered by red)
-            area_frac = red_count / (w * h)
-
-            # Steer toward centroid; slow down if target is large (close)
-            twist.linear.x  = max(0.05, 0.3 * (1.0 - area_frac * 5))
-            twist.angular.z = -0.8 * offset
-
-            if self._frame_count % 10 == 0:
-                self.get_logger().info(
-                    f'Target at cx={cx:.0f}px  offset={offset:+.2f}  '
-                    f'area={area_frac*100:.1f}%  '
-                    f'vx={twist.linear.x:.2f}  wz={twist.angular.z:.2f}'
-                )
 
         self._pub.publish(twist)
         self._frame_count += 1
