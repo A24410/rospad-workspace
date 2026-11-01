@@ -223,7 +223,21 @@ class ColorTracker(Node):
         #     (arr[:, :, 2] < 95)
         # )
         red_mask = predict_red_mask(arr)
+# AI判定の診断：画像の代表画素を確認
+if self._frame_count % 30 == 0:
+    points = [
+        (h // 2, w // 2),
+        (h // 4, w // 4),
+        (h // 4, 3 * w // 4),
+        (3 * h // 4, w // 4),
+        (3 * h // 4, 3 * w // 4),
+    ]
 
+    print("[AI DEBUG] RGB / Red prediction")
+    for py, px in points:
+        rgb = arr[py, px].tolist()
+        result = int(red_mask[py, px])
+        print(f"  ({px},{py}) RGB={rgb} Red={result}")
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
