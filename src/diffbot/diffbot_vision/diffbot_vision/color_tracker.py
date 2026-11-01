@@ -175,3 +175,132 @@ def detect_blobs(rgb):
             bh_ = max_y - min_y + 1
 
             crop = np.zeros((bh_, bw_), dtype=bool)
+            crop[np.array(ys) - min_y, np.array(xs) - min_x] = True
+
+            fill = area / (bw_ * bh_)
+            corner = corner_fill_ratio(crop)
+            aspect = bw_ / bh_
+            prob = sphere_probability(fill, corner, aspect)
+
+            blobs.append({
+                'cx': float(np.mean(xs) * SCALE),
+                'area': area * SCALE * SCALE / (h * w),
+                'fill': fill,
+                'corner': corner,
+                'aspect': aspect,
+                'prob': prob,
+            })
+
+    return blobs
+
+
+# ============================================================
+# ノード
+# ============================================================
+class SphereTracker(Node):
+    def __init__(self):
+        super().__init__('sphere_tracker')
+        self._sub = self.create_subscription(
+            Image, '/camera/image_raw', self._on_image, 10
+        )
+        self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        self.state = 'SEARCH'
+        self.state_count = 0
+        self.frame_count = 0
+        self.hits = 0
+        self.misses = 0
+
+        self.get_logger().info('SphereTracker started')
+
+    def _on_image(self, msg):
+        w, h = msg.width, msg.height
+        if w == 0 or h == 0:
+            return
+
+        rgb = image_msg_to_rgb(msg)
+        if rgb is None:
+            self.get_logger().warn(f'unsupported encoding: {msg.encoding}')
+            return
+
+        blobs = detect_blobs(rgb)
+        spheres = [b for b in blobs if b['prob'] >= SPHERE_PROB]
+        target = max(spheres, key=lambda b: b['area']) if spheres else None
+
+        if target is not None:
+            self.hits += 1
+            self.misses = 0
+        else:
+            self.misses += 1
+            self.hits = 0
+
+        twist = Twist()
+
+        if self.state == 'SEARCH':
+            twist.angular.z = 0.4
+            if self.hits >= 2:
+                self.state = 'APPROACH'
+                self.state_count = 0
+
+        elif self.state == 'APPROACH':
+            if self.misses >= 4 or target is None:
+                if self.misses >= 4:
+                    self.state = 'SEARCH'
+                    twist.angular.z = 0.4
+            else:
+                offset = (target['cx'] - w / 2.0) / (w / 2.0)
+                if target['area'] >= RETREAT_AREA:
+                    self.state = 'RETREAT'
+                    self.state_count = 0
+                    twist.linear.x = -0.15
+                else:
+                    twist.linear.x = max(0.06, 0.3 * (1.0 - target['area'] * 4))
+                    twist.angular.z = -0.9 * offset
+
+        elif self.state == 'RETREAT':
+            twist.linear.x = -0.15
+            self.state_count += 1
+            if self.state_count >= 15:
+                self.state = 'TURN'
+                self.state_count = 0
+
+        elif self.state == 'TURN':
+            twist.angular.z = -0.4
+            self.state_count += 1
+            if self.state_count >= 15:
+                self.state = 'SEARCH'
+                self.state_count = 0
+                self.hits = 0
+                self.misses = 0
+
+        self._pub.publish(twist)
+
+        # 10フレームごとに、検出した塊ごとの特徴をログ出力
+        if self.frame_count % 10 == 0:
+            self.get_logger().info(
+                f'State={self.state} Blobs={len(blobs)} Spheres={len(spheres)}'
+            )
+            for b in blobs[:5]:
+                self.get_logger().info(
+                    f'  blob fill={b["fill"]:.2f} corner={b["corner"]:.2f} '
+                    f'aspect={b["aspect"]:.2f} area={b["area"]*100:.1f}% '
+                    f'P(sphere)={b["prob"]:.2f}'
+                )
+        self.frame_count += 1
+
+
+def main():
+    rclpy.init()
+    node = SphereTracker()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node._pub.publish(Twist())
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
