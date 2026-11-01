@@ -111,6 +111,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
+from diffbot_vision.red_pixel_model import predict_red_mask
 
 class ColorTracker(Node):
     def __init__(self):
