@@ -278,13 +278,16 @@ class SphereTracker(Node):
         # 10フレームごとに、検出した塊ごとの特徴をログ出力
         if self.frame_count % 10 == 0:
             self.get_logger().info(
-                f'State={self.state} Blobs={len(blobs)} Spheres={len(spheres)}'
+                f'State={self.state} Blobs={len(blobs)} Spheres={len(spheres)} '
+                f'cmd(x={twist.linear.x:.2f}, z={twist.angular.z:.2f}) '
+                f'stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec}'
             )
             for b in blobs[:5]:
+                off = (b['cx'] - w / 2.0) / (w / 2.0)
                 self.get_logger().info(
                     f'  blob fill={b["fill"]:.2f} corner={b["corner"]:.2f} '
                     f'aspect={b["aspect"]:.2f} area={b["area"]*100:.1f}% '
-                    f'P(sphere)={b["prob"]:.2f}'
+                    f'offset={off:+.2f} P(sphere)={b["prob"]:.2f}'
                 )
         self.frame_count += 1
 
