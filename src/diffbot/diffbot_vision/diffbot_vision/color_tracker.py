@@ -103,3 +103,124 @@
 
 # if __name__ == '__main__':
 #     main()
+
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
+
+
+class ColorTracker(Node):
+    def __init__(self):
+        super().__init__('color_tracker')
+
+        self._sub = self.create_subscription(
+            Image, '/camera/image_raw', self._on_image, 10
+        )
+        self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        self.state = 'SEARCH'
+        self.state_count = 0
+        self._frame_count = 0
+
+        self.get_logger().info('ColorTracker started')
+
+    def _on_image(self, msg):
+        w, h = msg.width, msg.height
+        if w == 0 or h == 0:
+            return
+
+        arr = np.asarray(
+            list(msg.data), dtype=np.uint8
+        ).reshape(h, w, 3)
+
+        # 赤色領域を検出
+        red_mask = (
+            (arr[:, :, 0] > 70) &
+            (arr[:, :, 1] < 95) &
+            (arr[:, :, 2] < 95)
+        )
+
+        red_count = int(np.sum(red_mask))
+        area_frac = red_count / (w * h)
+
+        twist = Twist()
+
+        # SEARCH: 赤い物体を探す
+        if self.state == 'SEARCH':
+            twist.angular.z = 0.4
+
+            if red_count >= 50:
+                self.state = 'APPROACH'
+                self.state_count = 0
+
+        # APPROACH: 赤い物体に接近する
+        elif self.state == 'APPROACH':
+            if red_count < 50:
+                self.state = 'SEARCH'
+                twist.angular.z = 0.4
+            else:
+                ys, xs = np.where(red_mask)
+                cx = float(np.mean(xs))
+                offset = (cx - w / 2.0) / (w / 2.0)
+
+                if area_frac >= 0.12:
+                    self.state = 'RETREAT'
+                    self.state_count = 0
+                    twist.linear.x = -0.12
+                else:
+                    twist.linear.x = max(
+                        0.05, 0.3 * (1.0 - area_frac * 5)
+                    )
+                    twist.angular.z = -0.8 * offset
+
+        # RETREAT: 一定時間後退する
+        elif self.state == 'RETREAT':
+            twist.linear.x = -0.12
+            self.state_count += 1
+
+            if self.state_count >= 15:
+                self.state = 'TURN'
+                self.state_count = 0
+
+        # TURN: 向きを変えて再探索する
+        elif self.state == 'TURN':
+            twist.angular.z = -0.4
+            self.state_count += 1
+
+            if self.state_count >= 15:
+                self.state = 'SEARCH'
+                self.state_count = 0
+
+        self._pub.publish(twist)
+
+        if self._frame_count % 10 == 0:
+            self.get_logger().info(
+                f'State={self.state} '
+                f'Red={red_count} '
+                f'Area={area_frac * 100:.1f}%'
+            )
+
+        self._frame_count += 1
+
+
+def main():
+    rclpy.init()
+    node = ColorTracker()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 停止指令を送ってから終了
+        node._pub.publish(Twist())
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
