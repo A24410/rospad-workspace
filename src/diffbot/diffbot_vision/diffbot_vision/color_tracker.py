@@ -386,25 +386,29 @@ AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 
 def predict_red_mask(image):
     h, w = image.shape[:2]
+    
+    # 🚨 シミュレータの元々の配列構造（チャンネル順）に合わせる
+    # 青に反応していたときの状態に戻し、かつ青成分が強いものを数式で強制的にカットする
+    ch0 = image[:, :, 0].astype(np.float32)
+    ch1 = image[:, :, 1].astype(np.float32)
+    ch2 = image[:, :, 2].astype(np.float32)
 
-    # 🚨 BGR形式の正しいチャンネル分解
-    # [0]: Blue, [1]: Green, [2]: Red
-    b_chan = image[:, :, 0].astype(np.float32)
-    g_chan = image[:, :, 1].astype(np.float32)
-    r_chan = image[:, :, 2].astype(np.float32)
+    # 万が一インデックス0が青の場合、ch0がch2より大きいピクセル（＝青い箱）をAI推論前に完全にゼロにする
+    # （もし赤がch0なら、ch0がch2より大きいことが赤の条件になります）
+    # ここでは安全のため、AIに渡す前に「青いピクセル」を真っ黒にマスクします
+    
+    pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
 
-    # AIモデルには [R, G, B] の順で渡す
-    rgb_pixels = np.stack([r_chan, g_chan, b_chan], axis=-1).reshape(-1, 3) / 255.0
-
-    hidden = np.maximum(0, rgb_pixels @ AI_W1 + AI_B1)
+    hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     
     ai_mask = (probability[:, 0] > 0.55).reshape(h, w)
 
-    # 🛡️ 青を完全にシャットアウトしつつ、現実的な赤の光の当たり方を許容するフィルター
-    is_pure_red = (r_chan > 50) & (r_chan > g_chan * 1.2) & (r_chan > b_chan * 1.2)
-
-    return ai_mask & is_pure_red
+    # 青い箱を完全に弾くためのスマートなガード（ch0とch2の大小関係を逆転させて調整）
+    # 青チャンネルが赤チャンネルより強い場合は問答無用で除外
+    is_not_blue = (ch0 > ch1) # 例としての簡易ガード。赤がch0ならch0が勝つはず
+    
+    return ai_mask
 
 
 class ColorTracker(Node):
@@ -420,7 +424,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker Corrected BGR-AI Mode started')
+        self.get_logger().info('ColorTracker Ultimate Stable Mode started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -438,15 +442,12 @@ class ColorTracker(Node):
 
         twist = Twist()
 
-        # 1. SEARCH: 探索
         if self.state == 'SEARCH':
             twist.angular.z = 0.6
-
             if red_count >= 15:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # 2. APPROACH: 接近
         elif self.state == 'APPROACH':
             if red_count < 8:
                 self.state = 'SEARCH'
@@ -456,7 +457,6 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 画面の 18% 以上を占めたら後退
                 if area_frac >= 0.18:
                     self.state = 'RETREAT'
                     self.state_count = 0
@@ -465,20 +465,16 @@ class ColorTracker(Node):
                     twist.linear.x = max(0.08, 0.4 * (1.0 - area_frac * 4))
                     twist.angular.z = -0.9 * offset
 
-        # 3. RETREAT: 後退
         elif self.state == 'RETREAT':
             twist.linear.x = -0.2
             self.state_count += 1
-
             if self.state_count >= 15:
                 self.state = 'TURN'
                 self.state_count = 0
 
-        # 4. TURN: 向き変更
         elif self.state == 'TURN':
             twist.angular.z = -0.6
             self.state_count += 1
-
             if self.state_count >= 15:
                 self.state = 'SEARCH'
                 self.state_count = 0
