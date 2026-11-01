@@ -338,7 +338,6 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    # 1. 赤色のトレーニングデータ作成
     r = rng.uniform(0.6, 1.0, n)
     g = rng.uniform(0.0, 0.25, n)
     b = rng.uniform(0.0, 0.25, n)
@@ -346,11 +345,8 @@ def make_ai_model():
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
-    # 2. 非赤色（青、緑、暗い背景など）のトレーニングデータ作成
     non_red_list = []
-    # 青・緑系
     non_red_list.append(rng.uniform(0.0, 1.0, (n // 2, 3)))
-    # 暗い背景・黒
     non_red_list.append(rng.uniform(0.0, 0.15, (n // 2, 3)))
     non_red = np.concatenate(non_red_list)[:n]
 
@@ -360,13 +356,11 @@ def make_ai_model():
     order = rng.permutation(len(x))
     x, y = x[order], y[order]
 
-    # 重みの初期化
     w1 = rng.normal(0, 0.3, (3, 12)).astype(np.float32)
     b1 = np.zeros((1, 12), dtype=np.float32)
     w2 = rng.normal(0, 0.3, (12, 1)).astype(np.float32)
     b2 = np.full((1, 1), -1.0, dtype=np.float32)
 
-    # 簡易学習ループ
     for _ in range(250):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
@@ -385,25 +379,33 @@ def make_ai_model():
         w2 -= 0.3 * dw2
         b2 -= 0.3 * db2
 
-    print("[AI Model] Training completed successfully.")
     return w1, b1, w2, b2
 
 
-# ノード起動時にAIモデルを一度だけビルド
 AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 
 
-def predict_red_mask(image):
+def evaluate_image(image):
     h, w = image.shape[:2]
     pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
 
-    # AIモデルによるピクセルごとの推論 (順伝播)
+    # 1. AIモデルによる赤推論
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
+    ai_red_mask = (probability[:, 0] > 0.6).reshape(h, w)
 
-    # 確率が 0.6 を超えたピクセルを「赤」と判定 (AIマスク)
-    ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
-    return ai_mask
+    # 2. 🛡️ 【重要】青や緑が優勢なピクセルを厳密に検知するマスク
+    r = image[:, :, 0].astype(np.float32)
+    g = image[:, :, 1].astype(np.float32)
+    b = image[:, :, 2].astype(np.float32)
+
+    # 青い箱の判定：青成分（B）が赤や緑よりも明確に強い、あるいは一定以上ある
+    is_blue = (b > r * 1.2) | (b > g * 1.2) & (b > 60)
+    
+    # AIが赤と判定した中でも、もし「青」の成分が含まれていたら強制的に除外する
+    pure_red_mask = ai_red_mask & (~is_blue)
+
+    return pure_red_mask, np.sum(is_blue)
 
 
 class ColorTracker(Node):
@@ -419,7 +421,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker AI Mode started')
+        self.get_logger().info('ColorTracker AI + Anti-Blue Guard started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -430,25 +432,35 @@ class ColorTracker(Node):
             list(msg.data), dtype=np.uint8
         ).reshape(h, w, 3)
 
-        # AIモデルに画像を渡して赤マスクを取得
-        red_mask = predict_red_mask(arr)
+        red_mask, blue_count = evaluate_image(arr)
         
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
         twist = Twist()
 
-        # 1. SEARCH: 赤い箱をAIで探す
+        # 💡 【追加アイデア】もし視野内に「青いもの」が一定数見えたら、
+        # 赤を探すどころか、即座に「青だ！回転して逃げろ/避けろ！」と判断して回転モードにする
+        if blue_count > 50:  # 青いピクセルを一定以上検知した場合
+            self.state = 'SEARCH'
+            twist.angular.z = 0.8  # 急旋回して青を視野から追い出す
+            self._pub.publish(twist)
+            if self._frame_count % 10 == 0:
+                self.get_logger().info(f'State=AVOID_BLUE (Blue pixels: {blue_count})')
+            self._frame_count += 1
+            return
+
+        # 1. SEARCH: 赤を探して回転
         if self.state == 'SEARCH':
             twist.angular.z = 0.6
 
-            if red_count >= 20:  # 一定数以上の赤ピクセルを検知したら接近へ
+            if red_count >= 20:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # 2. APPROACH: AIで中心を追従しながら接近
+        # 2. APPROACH: 赤に接近
         elif self.state == 'APPROACH':
-            if red_count < 10:  # 見失ったら探索に戻る
+            if red_count < 10:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.6
             else:
@@ -456,26 +468,25 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 十分に近づいたら（例: 画面の15%以上）後退ステートへ移行
+                # 画面の15%以上を占めたら後退
                 if area_frac >= 0.15:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.2
                 else:
-                    # 面積に応じて減速しながら前進
                     twist.linear.x = max(0.08, 0.4 * (1.0 - area_frac * 4))
                     twist.angular.z = -0.9 * offset
 
-        # 3. RETREAT: 一定時間後退する
+        # 3. RETREAT: 後退
         elif self.state == 'RETREAT':
             twist.linear.x = -0.2
             self.state_count += 1
 
-            if self.state_count >= 20:  # しっかり下がるまで待つ
+            if self.state_count >= 20:
                 self.state = 'TURN'
                 self.state_count = 0
 
-        # 4. TURN: 向きを変えて再探索に備える
+        # 4. TURN: 向き変更
         elif self.state == 'TURN':
             twist.angular.z = -0.6
             self.state_count += 1
