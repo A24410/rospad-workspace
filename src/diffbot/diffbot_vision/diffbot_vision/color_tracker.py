@@ -338,9 +338,9 @@ def make_ai_model():
     n = 4000
 
     r = rng.uniform(0.6, 1.0, n)
-    g = rng.uniform(0.0, 0.2, n)
-    b = rng.uniform(0.0, 0.2, n)
-    brightness = rng.uniform(0.4, 1.0, n)
+    g = rng.uniform(0.0, 0.25, n)
+    b = rng.uniform(0.0, 0.25, n)
+    brightness = rng.uniform(0.3, 1.0, n)
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
@@ -358,7 +358,7 @@ def make_ai_model():
     w1 = rng.normal(0, 0.3, (3, 10)).astype(np.float32)
     b1 = np.zeros((1, 10), dtype=np.float32)
     w2 = rng.normal(0, 0.3, (10, 1)).astype(np.float32)
-    b2 = np.full((1, 1), -1.2, dtype=np.float32)
+    b2 = np.full((1, 1), -1.0, dtype=np.float32)
 
     for _ in range(200):
         z1 = x @ w1 + b1
@@ -387,22 +387,22 @@ AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 def predict_red_mask(image):
     h, w = image.shape[:2]
 
-    # 🚨 元々の正しい順序（RGB）に戻す
-    # index 0: Red, index 1: Green, index 2: Blue
-    r_chan = image[:, :, 0].astype(np.float32)
+    # 🚨 BGR形式の正しいチャンネル分解
+    # [0]: Blue, [1]: Green, [2]: Red
+    b_chan = image[:, :, 0].astype(np.float32)
     g_chan = image[:, :, 1].astype(np.float32)
-    b_chan = image[:, :, 2].astype(np.float32)
+    r_chan = image[:, :, 2].astype(np.float32)
 
-    pixels = np.stack([r_chan, g_chan, b_chan], axis=-1).reshape(-1, 3) / 255.0
+    # AIモデルには [R, G, B] の順で渡す
+    rgb_pixels = np.stack([r_chan, g_chan, b_chan], axis=-1).reshape(-1, 3) / 255.0
 
-    # AIモデルによる予測
-    hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
+    hidden = np.maximum(0, rgb_pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     
-    ai_mask = (probability[:, 0] > 0.65).reshape(h, w)
+    ai_mask = (probability[:, 0] > 0.55).reshape(h, w)
 
-    # 🛡️ 青い箱（Bが高い）や緑の箱を完全にシャットアウトするフィルター
-    is_pure_red = (r_chan > g_chan * 1.3) & (r_chan > b_chan * 1.3) & (g_chan < 100) & (b_chan < 100) & (r_chan > 60)
+    # 🛡️ 青を完全にシャットアウトしつつ、現実的な赤の光の当たり方を許容するフィルター
+    is_pure_red = (r_chan > 50) & (r_chan > g_chan * 1.2) & (r_chan > b_chan * 1.2)
 
     return ai_mask & is_pure_red
 
@@ -420,7 +420,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker RGB-Corrected AI Mode started')
+        self.get_logger().info('ColorTracker Corrected BGR-AI Mode started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -456,6 +456,7 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
+                # 画面の 18% 以上を占めたら後退
                 if area_frac >= 0.18:
                     self.state = 'RETREAT'
                     self.state_count = 0
