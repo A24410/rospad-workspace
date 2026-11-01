@@ -337,7 +337,6 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    # 1. 赤色のトレーニングデータ（RGB）
     r = rng.uniform(0.6, 1.0, n)
     g = rng.uniform(0.0, 0.2, n)
     b = rng.uniform(0.0, 0.2, n)
@@ -345,7 +344,6 @@ def make_ai_model():
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
-    # 2. 非赤色（青、緑、黒など）
     non_red_list = []
     non_red_list.append(rng.uniform(0.0, 1.0, (n // 2, 3)))
     non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3)))
@@ -389,23 +387,22 @@ AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 def predict_red_mask(image):
     h, w = image.shape[:2]
 
-    # 画像は元々のRGB順として処理
-    pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
+    # 🚨 元々の正しい順序（RGB）に戻す
+    # index 0: Red, index 1: Green, index 2: Blue
+    r_chan = image[:, :, 0].astype(np.float32)
+    g_chan = image[:, :, 1].astype(np.float32)
+    b_chan = image[:, :, 2].astype(np.float32)
+
+    pixels = np.stack([r_chan, g_chan, b_chan], axis=-1).reshape(-1, 3) / 255.0
 
     # AIモデルによる予測
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     
-    # AIの確率が 0.7 を超えるピクセルを抽出
-    ai_mask = (probability[:, 0] > 0.7).reshape(h, w)
+    ai_mask = (probability[:, 0] > 0.65).reshape(h, w)
 
-    # 🛡️ 青い箱や緑の箱を物理的に完全に遮断するフィルター
-    r = image[:, :, 0].astype(np.float32)
-    g = image[:, :, 1].astype(np.float32)
-    b = image[:, :, 2].astype(np.float32)
-
-    # 「赤成分が青や緑よりも明確に強く、かつ青や緑が一定以下」であること
-    is_pure_red = (r > g * 1.3) & (r > b * 1.3) & (g < 100) & (b < 100) & (r > 60)
+    # 🛡️ 青い箱（Bが高い）や緑の箱を完全にシャットアウトするフィルター
+    is_pure_red = (r_chan > g_chan * 1.3) & (r_chan > b_chan * 1.3) & (g_chan < 100) & (b_chan < 100) & (r_chan > 60)
 
     return ai_mask & is_pure_red
 
@@ -423,7 +420,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker Final AI Mode started')
+        self.get_logger().info('ColorTracker RGB-Corrected AI Mode started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -459,7 +456,6 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 画面の 18% 以上を占めたら後退
                 if area_frac >= 0.18:
                     self.state = 'RETREAT'
                     self.state_count = 0
