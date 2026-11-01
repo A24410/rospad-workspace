@@ -347,15 +347,15 @@ def make_ai_model():
 
     non_red_list = []
     
-    # 青色のサンプル
-    blue_r = rng.uniform(0.0, 0.3, n // 3)
-    blue_g = rng.uniform(0.0, 0.4, n // 3)
-    blue_b = rng.uniform(0.5, 1.0, n // 3)
+    # 青色のサンプルを強力に学習
+    blue_r = rng.uniform(0.0, 0.3, n // 2)
+    blue_g = rng.uniform(0.0, 0.4, n // 2)
+    blue_b = rng.uniform(0.4, 1.0, n // 2)
     blue_samples = np.column_stack([blue_r, blue_g, blue_b])
     non_red_list.append(blue_samples)
 
     # 黒・暗い背景
-    dark_samples = rng.uniform(0.0, 0.15, (n // 3, 3))
+    dark_samples = rng.uniform(0.0, 0.15, (n // 2, 3))
     non_red_list.append(dark_samples)
 
     while sum(len(v) for v in non_red_list) < n:
@@ -415,11 +415,19 @@ def predict_red_mask(image):
     h, w = image.shape[:2]
     pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
 
+    # 1. AIモデルによる確率計算
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
+    ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
 
-    # 閾値を 0.55 に下げて、影や少し暗い赤色でも検知しやすくする
-    return (probability[:, 0] > 0.55).reshape(h, w)
+    # 2. 青色除外ガード（青い箱対策）：
+    # 青成分（B）が赤成分（R）に対して強いピクセル、または青の要素が目立つピクセルは強制的に除外する
+    r_chan = image[:, :, 0].astype(np.float32)
+    b_chan = image[:, :, 2].astype(np.float32)
+    not_blue = (r_chan > b_chan * 1.15) & (b_chan < 120)
+
+    # AIの判定かつ、青くないピクセルのみを「本当の赤」として採用
+    return ai_mask & not_blue
 
 
 class ColorTracker(Node):
@@ -435,7 +443,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started')
+        self.get_logger().info('ColorTracker started with AI + Blue-Guard')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -468,17 +476,16 @@ class ColorTracker(Node):
 
         twist = Twist()
 
-        # SEARCH: 赤い物体を探す（少しの画素で見つかったと判定）
+        # SEARCH: 赤い物体を探す
         if self.state == 'SEARCH':
             twist.angular.z = 0.4
 
-            if red_count >= 20:  # 50から20に下げて見つけやすくする
+            if red_count >= 20:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
         # APPROACH: 赤い物体に接近する
         elif self.state == 'APPROACH':
-            # 見失う判定を厳しくして、ちょっとしたチラつきでSEARCHに戻らないようにする
             if red_count < 10:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.4
@@ -487,7 +494,6 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 十分に近づいたら（面積 12% 以上）後退へ移行
                 if area_frac >= 0.12:
                     self.state = 'RETREAT'
                     self.state_count = 0
