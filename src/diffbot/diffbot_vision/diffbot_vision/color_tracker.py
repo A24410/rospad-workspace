@@ -112,7 +112,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
 # --- AI model ---
-import numpy as np
+
 
 def sigmoid(x):
     x = np.clip(x, -30, 30)
