@@ -337,7 +337,6 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    # 1. 赤色データの生成 (Rが高く、GとBが低い純粋な赤)
     r = rng.uniform(0.65, 1.0, n)
     g = rng.uniform(0.0, 0.25, n)
     b = rng.uniform(0.0, 0.25, n)
@@ -346,10 +345,9 @@ def make_ai_model():
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
-    # 2. 非赤色データの生成 (青、緑、黒、白、グレーなど、あらゆる非赤色を徹底的に学習)
     non_red_list = []
     
-    # 青色のサンプルを多めに追加して青い箱を確実に除外する
+    # 青色のサンプル
     blue_r = rng.uniform(0.0, 0.3, n // 3)
     blue_g = rng.uniform(0.0, 0.4, n // 3)
     blue_b = rng.uniform(0.5, 1.0, n // 3)
@@ -360,10 +358,8 @@ def make_ai_model():
     dark_samples = rng.uniform(0.0, 0.15, (n // 3, 3))
     non_red_list.append(dark_samples)
 
-    # その他のランダムな色
     while sum(len(v) for v in non_red_list) < n:
         samples = rng.uniform(0, 1, (n, 3))
-        # 厳密な赤の条件に当てはまらないものはすべて非赤色
         is_red_condition = (
             (samples[:, 0] > 0.6) &
             (samples[:, 0] > samples[:, 1] * 1.5) &
@@ -383,13 +379,11 @@ def make_ai_model():
     order = rng.permutation(len(x))
     x, y = x[order], y[order]
 
-    # 3. ネットワークの重み初期化
     w1 = rng.normal(0, 0.5, (3, 10)).astype(np.float32)
     b1 = np.zeros((1, 10), dtype=np.float32)
     w2 = rng.normal(0, 0.5, (10, 1)).astype(np.float32)
-    b2 = np.full((1, 1), -2.0, dtype=np.float32)  # 初期バイアスをさらに負にして厳しく判定
+    b2 = np.full((1, 1), -2.0, dtype=np.float32)
 
-    # 4. 学習ループ
     for _ in range(300):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
@@ -424,8 +418,8 @@ def predict_red_mask(image):
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
 
-    # 閾値を 0.85 に引き上げ、青やその他の色を完全に無視して純粋な赤だけを検出する
-    return (probability[:, 0] > 0.85).reshape(h, w)
+    # 閾値を 0.55 に下げて、影や少し暗い赤色でも検知しやすくする
+    return (probability[:, 0] > 0.55).reshape(h, w)
 
 
 class ColorTracker(Node):
@@ -441,7 +435,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started with strict red AI model')
+        self.get_logger().info('ColorTracker started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -454,7 +448,6 @@ class ColorTracker(Node):
 
         red_mask = predict_red_mask(arr)
         
-        # デバッグログ：青い箱を見ているときに Red=0 になっているか確認
         if self._frame_count % 30 == 0:
             points = [
                 (h // 2, w // 2),
@@ -475,17 +468,18 @@ class ColorTracker(Node):
 
         twist = Twist()
 
-        # SEARCH: 赤い物体を探す
+        # SEARCH: 赤い物体を探す（少しの画素で見つかったと判定）
         if self.state == 'SEARCH':
             twist.angular.z = 0.4
 
-            if red_count >= 50:
+            if red_count >= 20:  # 50から20に下げて見つけやすくする
                 self.state = 'APPROACH'
                 self.state_count = 0
 
         # APPROACH: 赤い物体に接近する
         elif self.state == 'APPROACH':
-            if red_count < 50:
+            # 見失う判定を厳しくして、ちょっとしたチラつきでSEARCHに戻らないようにする
+            if red_count < 10:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.4
             else:
@@ -493,8 +487,8 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 赤い箱に十分接近したら（面積が 15% 以上になったら）RETREAT（後退）へ移行
-                if area_frac >= 0.15:
+                # 十分に近づいたら（面積 12% 以上）後退へ移行
+                if area_frac >= 0.12:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.12
