@@ -111,7 +111,88 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
-from diffbot_vision.red_pixel_model import predict_red_mask
+# --- AI model ---
+import numpy as np
+
+def sigmoid(x):
+    x = np.clip(x, -30, 30)
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def make_ai_model():
+    rng = np.random.default_rng(42)
+    n = 4000
+
+    r = rng.uniform(0.65, 1.0, n)
+    g = rng.uniform(0.05, 0.40, n)
+    b = rng.uniform(0.04, 0.38, n)
+    brightness = rng.uniform(0.35, 1.0, n)
+
+    red = np.column_stack([r, g, b]) * brightness[:, None]
+    red += rng.normal(0, 0.025, red.shape)
+    red = np.clip(red, 0, 1)
+
+    non_red = []
+    while sum(len(v) for v in non_red) < n:
+        samples = rng.uniform(0, 1, (n, 3))
+        is_red = (
+            (samples[:, 0] > samples[:, 1] * 1.2) &
+            (samples[:, 0] > samples[:, 2] * 1.2) &
+            (samples[:, 1] < 0.5) &
+            (samples[:, 2] < 0.5)
+        )
+        non_red.append(samples[~is_red])
+
+    non_red = np.concatenate(non_red)[:n]
+
+    x = np.vstack([red, non_red]).astype(np.float32)
+    y = np.concatenate([
+        np.ones(n), np.zeros(n)
+    ]).reshape(-1, 1).astype(np.float32)
+
+    order = rng.permutation(len(x))
+    x, y = x[order], y[order]
+
+    w1 = rng.normal(0, 0.5, (3, 8)).astype(np.float32)
+    b1 = np.zeros((1, 8), dtype=np.float32)
+    w2 = rng.normal(0, 0.5, (8, 1)).astype(np.float32)
+    b2 = np.zeros((1, 1), dtype=np.float32)
+
+    for _ in range(100):
+        z1 = x @ w1 + b1
+        h1 = np.maximum(0, z1)
+        output = sigmoid(h1 @ w2 + b2)
+
+        dz2 = output - y
+        dw2 = h1.T @ dz2 / len(x)
+        db2 = np.mean(dz2, axis=0, keepdims=True)
+
+        dz1 = (dz2 @ w2.T) * (z1 > 0)
+        dw1 = x.T @ dz1 / len(x)
+        db1 = np.mean(dz1, axis=0, keepdims=True)
+
+        w1 -= 0.3 * dw1
+        b1 -= 0.3 * db1
+        w2 -= 0.3 * dw2
+        b2 -= 0.3 * db2
+
+    accuracy = np.mean((output >= 0.5) == (y >= 0.5))
+    print(f"[AI] Training accuracy: {accuracy * 100:.1f}%")
+
+    return w1, b1, w2, b2
+
+
+AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
+
+
+def predict_red_mask(image):
+    h, w = image.shape[:2]
+    pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
+
+    hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
+    probability = sigmoid(hidden @ AI_W2 + AI_B2)
+
+    return (probability[:, 0] > 0.75).reshape(h, w)
 
 class ColorTracker(Node):
     def __init__(self):
@@ -144,7 +225,7 @@ class ColorTracker(Node):
         #     (arr[:, :, 2] < 95)
         # )
         red_mask = predict_red_mask(arr)
-        
+
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
