@@ -13,8 +13,12 @@ MIN_AREA = 12             # 小さすぎる塊を無視 (間引き後の画素�
 SPHERE_PROB = 0.6         # 見つけるときのしきい値
 KEEP_PROB = 0.3           # 追跡中のしきい値
 RETREAT_AREA = 0.05       # これ以上の面積で後退
-NEAR_AREA = 0.02          # 見失う直前にこれ以上なら「到達」とみなす
+NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到達」とみなす
 LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数
+
+# 旋回の向き。球体が画面の端へ逃げていくなら -1.0 にする
+STEER_SIGN = 1.0
+STEER_GAIN = 0.9
 
 
 # ============================================================
@@ -29,18 +33,21 @@ def make_ai_model():
     rng = np.random.default_rng(0)
     n = 3000
 
+    # 球体: 実測ログに合わせ、影で横に伸びた形も含める
     sphere = np.column_stack([
-        rng.normal(0.78, 0.06, n),
-        rng.normal(0.25, 0.12, n),
-        rng.normal(1.0, 0.12, n),
+        rng.normal(0.74, 0.08, n),
+        rng.normal(0.30, 0.15, n),
+        rng.normal(1.15, 0.30, n),
     ])
+    # 箱: 充填率が高く、四隅も埋まる
     box = np.column_stack([
         rng.normal(0.95, 0.05, n),
         rng.normal(0.90, 0.08, n),
         rng.uniform(0.5, 2.0, n),
     ])
+    # 欠けた塊 / ノイズ: 充填率が低い
     junk = np.column_stack([
-        rng.uniform(0.2, 0.65, n),
+        rng.uniform(0.2, 0.62, n),
         rng.uniform(0.0, 1.0, n),
         rng.uniform(0.3, 3.0, n),
     ])
@@ -223,6 +230,10 @@ class SphereTracker(Node):
         self.hits = 0
         self.lost = 0
 
+    def steer(self, offset):
+        """球体を画面中央に寄せる旋回指令"""
+        return STEER_SIGN * STEER_GAIN * offset
+
     def _on_image(self, msg):
         w, h = msg.width, msg.height
         if w == 0 or h == 0:
@@ -277,7 +288,7 @@ class SphereTracker(Node):
                     twist.linear.x = -0.15
                 else:
                     twist.linear.x = max(0.06, 0.3 * (1.0 - target['area'] * 4))
-                    twist.angular.z = -0.9 * offset
+                    twist.angular.z = self.steer(offset)
             else:
                 self.lost += 1
                 if self.lost >= LOST_LIMIT:
@@ -292,7 +303,7 @@ class SphereTracker(Node):
                 else:
                     # 見失った直後は、最後に見えた方向へゆっくり進む
                     twist.linear.x = 0.05
-                    twist.angular.z = -0.9 * self.last_offset
+                    twist.angular.z = self.steer(self.last_offset)
 
         elif self.state == 'RETREAT':
             twist.linear.x = -0.15
