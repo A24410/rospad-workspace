@@ -327,7 +327,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
-# --- AI model ---
+# --- AI model (赤専用にチューニング) ---
 def sigmoid(x):
     x = np.clip(x, -30, 30)
     return 1.0 / (1.0 + np.exp(-x))
@@ -337,28 +337,20 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    r = rng.uniform(0.6, 1.0, n)
-    g = rng.uniform(0.0, 0.25, n)
-    b = rng.uniform(0.0, 0.25, n)
-    brightness = rng.uniform(0.35, 1.0, n)
+    # シミュレータの赤色（#ff2020系）と影（明暗）を正確に学習データ化
+    r = rng.uniform(0.7, 1.0, n)
+    g = rng.uniform(0.0, 0.2, n)
+    b = rng.uniform(0.0, 0.2, n)
+    brightness = rng.uniform(0.3, 1.0, n)
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
+    # 非赤色（青、緑、白、黒、背景などすべて）
     non_red_list = []
     
-    # 青色サンプルを徹底学習
-    blue_r = rng.uniform(0.0, 0.3, n // 2)
-    blue_g = rng.uniform(0.0, 0.4, n // 2)
-    blue_b = rng.uniform(0.4, 1.0, n // 2)
-    non_red_list.append(np.column_stack([blue_r, blue_g, blue_b]))
-
-    # 黒・暗い背景
-    non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3)))
-
-    while sum(len(v) for v in non_red_list) < n:
-        samples = rng.uniform(0, 1, (n, 3))
-        is_red = (samples[:, 0] > 0.5) & (samples[:, 1] < 0.3) & (samples[:, 2] < 0.3)
-        non_red_list.append(samples[~is_red])
+    # 青や緑のサンプルを大量に追加
+    non_red_list.append(rng.uniform(0.0, 1.0, (n // 2, 3))) # ランダムな色
+    non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3))) # 黒・暗い背景
 
     non_red = np.concatenate(non_red_list)[:n]
 
@@ -368,12 +360,12 @@ def make_ai_model():
     order = rng.permutation(len(x))
     x, y = x[order], y[order]
 
-    w1 = rng.normal(0, 0.3, (3, 12)).astype(np.float32)
-    b1 = np.zeros((1, 12), dtype=np.float32)
-    w2 = rng.normal(0, 0.3, (12, 1)).astype(np.float32)
-    b2 = np.full((1, 1), -1.5, dtype=np.float32)
+    w1 = rng.normal(0, 0.3, (3, 10)).astype(np.float32)
+    b1 = np.zeros((1, 10), dtype=np.float32)
+    w2 = rng.normal(0, 0.3, (10, 1)).astype(np.float32)
+    b2 = np.full((1, 1), -1.0, dtype=np.float32)
 
-    for _ in range(300):
+    for _ in range(200):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
         output = sigmoid(h1 @ w2 + b2)
@@ -391,9 +383,6 @@ def make_ai_model():
         w2 -= 0.3 * dw2
         b2 -= 0.3 * db2
 
-    accuracy = np.mean((output >= 0.5) == (y >= 0.5))
-    print(f"[AI] Training accuracy: {accuracy * 100:.1f}%")
-
     return w1, b1, w2, b2
 
 
@@ -407,15 +396,15 @@ def predict_red_mask(image):
     # 1. AIモデル予測
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
-    ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
+    ai_mask = (probability[:, 0] > 0.5).reshape(h, w)
 
-    # 2. 【強力な青ブロックフィルター】青い箱や暗い背景を完全にシャットアウト
+    # 2. 🛡️ 青・緑・背景を完全シャットアウトする物理フィルター
     r = image[:, :, 0].astype(np.float32)
     g = image[:, :, 1].astype(np.float32)
     b = image[:, :, 2].astype(np.float32)
 
-    # 赤が緑より強く、かつ「青成分が一定以下（B < 80）」であること
-    is_pure_red = (r > g * 1.3) & (r > 60) & (b < 80)
+    # 「赤が緑よりも青よりも圧倒的に強く、かつ青や緑の成分が一定以下」であること
+    is_pure_red = (r > g * 1.5) & (r > b * 1.5) & (g < 90) & (b < 90) & (r > 50)
 
     return ai_mask & is_pure_red
 
@@ -433,7 +422,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started (Close approach & Anti-blue mode)')
+        self.get_logger().info('ColorTracker started (Red-Only Strict mode)')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -451,7 +440,7 @@ class ColorTracker(Node):
 
         twist = Twist()
 
-        # SEARCH
+        # SEARCH: 赤い箱を探して旋回
         if self.state == 'SEARCH':
             twist.angular.z = 0.7
 
@@ -459,7 +448,7 @@ class ColorTracker(Node):
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # APPROACH
+        # APPROACH: 赤い箱に限界まで接近
         elif self.state == 'APPROACH':
             if red_count < 8:
                 self.state = 'SEARCH'
@@ -469,8 +458,8 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 画面の 20%（0.20）を占めるまでギリギリまで接近してから後退する
-                if area_frac >= 0.20:
+                # 画面の 22% を占めるまでギリギリまで突撃し、そこで初めて後退へ移行
+                if area_frac >= 0.22:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.25
@@ -478,7 +467,7 @@ class ColorTracker(Node):
                     twist.linear.x = max(0.08, 0.45 * (1.0 - area_frac * 3))
                     twist.angular.z = -1.0 * offset
 
-        # RETREAT
+        # RETREAT: 後退
         elif self.state == 'RETREAT':
             twist.linear.x = -0.25
             self.state_count += 1
@@ -487,7 +476,7 @@ class ColorTracker(Node):
                 self.state = 'TURN'
                 self.state_count = 0
 
-        # TURN
+        # TURN: 向き変更
         elif self.state == 'TURN':
             twist.angular.z = -0.7
             self.state_count += 1
