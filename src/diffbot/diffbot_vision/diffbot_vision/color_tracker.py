@@ -321,7 +321,6 @@
 # if __name__ == '__main__':
 #     main()
 #**********************************************************
-
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -338,16 +337,17 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    r = rng.uniform(0.6, 1.0, n)
-    g = rng.uniform(0.0, 0.25, n)
-    b = rng.uniform(0.0, 0.25, n)
-    brightness = rng.uniform(0.3, 1.0, n)
+    r = rng.uniform(0.65, 1.0, n)
+    g = rng.uniform(0.0, 0.2, n)
+    b = rng.uniform(0.0, 0.2, n)
+    brightness = rng.uniform(0.4, 1.0, n)
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
     non_red_list = []
+    # あらゆる非赤色を広く学習
     non_red_list.append(rng.uniform(0.0, 1.0, (n // 2, 3)))
-    non_red_list.append(rng.uniform(0.0, 0.15, (n // 2, 3)))
+    non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3)))
     non_red = np.concatenate(non_red_list)[:n]
 
     x = np.vstack([red, non_red]).astype(np.float32)
@@ -356,12 +356,12 @@ def make_ai_model():
     order = rng.permutation(len(x))
     x, y = x[order], y[order]
 
-    w1 = rng.normal(0, 0.3, (3, 12)).astype(np.float32)
-    b1 = np.zeros((1, 12), dtype=np.float32)
-    w2 = rng.normal(0, 0.3, (12, 1)).astype(np.float32)
-    b2 = np.full((1, 1), -1.0, dtype=np.float32)
+    w1 = rng.normal(0, 0.3, (3, 10)).astype(np.float32)
+    b1 = np.zeros((1, 10), dtype=np.float32)
+    w2 = rng.normal(0, 0.3, (10, 1)).astype(np.float32)
+    b2 = np.full((1, 1), -1.2, dtype=np.float32)
 
-    for _ in range(250):
+    for _ in range(200):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
         output = sigmoid(h1 @ w2 + b2)
@@ -385,27 +385,17 @@ def make_ai_model():
 AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 
 
-def evaluate_image(image):
+def predict_red_mask(image):
     h, w = image.shape[:2]
     pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
 
-    # 1. AIモデルによる赤推論
+    # AIモデルによる予測
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
-    ai_red_mask = (probability[:, 0] > 0.6).reshape(h, w)
-
-    # 2. 🛡️ 【重要】青や緑が優勢なピクセルを厳密に検知するマスク
-    r = image[:, :, 0].astype(np.float32)
-    g = image[:, :, 1].astype(np.float32)
-    b = image[:, :, 2].astype(np.float32)
-
-    # 青い箱の判定：青成分（B）が赤や緑よりも明確に強い、あるいは一定以上ある
-    is_blue = (b > r * 1.2) | (b > g * 1.2) & (b > 60)
     
-    # AIが赤と判定した中でも、もし「青」の成分が含まれていたら強制的に除外する
-    pure_red_mask = ai_red_mask & (~is_blue)
-
-    return pure_red_mask, np.sum(is_blue)
+    # 確率 0.65 以上を赤とする
+    ai_mask = (probability[:, 0] > 0.65).reshape(h, w)
+    return ai_mask
 
 
 class ColorTracker(Node):
@@ -421,7 +411,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker AI + Anti-Blue Guard started')
+        self.get_logger().info('ColorTracker Clean AI Mode started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -432,35 +422,24 @@ class ColorTracker(Node):
             list(msg.data), dtype=np.uint8
         ).reshape(h, w, 3)
 
-        red_mask, blue_count = evaluate_image(arr)
+        red_mask = predict_red_mask(arr)
         
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
         twist = Twist()
 
-        # 💡 【追加アイデア】もし視野内に「青いもの」が一定数見えたら、
-        # 赤を探すどころか、即座に「青だ！回転して逃げろ/避けろ！」と判断して回転モードにする
-        if blue_count > 50:  # 青いピクセルを一定以上検知した場合
-            self.state = 'SEARCH'
-            twist.angular.z = 0.8  # 急旋回して青を視野から追い出す
-            self._pub.publish(twist)
-            if self._frame_count % 10 == 0:
-                self.get_logger().info(f'State=AVOID_BLUE (Blue pixels: {blue_count})')
-            self._frame_count += 1
-            return
-
-        # 1. SEARCH: 赤を探して回転
+        # 1. SEARCH: 赤い箱を探して回転
         if self.state == 'SEARCH':
             twist.angular.z = 0.6
 
-            if red_count >= 20:
+            if red_count >= 15:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # 2. APPROACH: 赤に接近
+        # 2. APPROACH: 赤い箱に接近
         elif self.state == 'APPROACH':
-            if red_count < 10:
+            if red_count < 8:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.6
             else:
@@ -468,8 +447,8 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 画面の15%以上を占めたら後退
-                if area_frac >= 0.15:
+                # 画面の18%以上を占めたら後退へ
+                if area_frac >= 0.18:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.2
@@ -482,7 +461,7 @@ class ColorTracker(Node):
             twist.linear.x = -0.2
             self.state_count += 1
 
-            if self.state_count >= 20:
+            if self.state_count >= 15:
                 self.state = 'TURN'
                 self.state_count = 0
 
