@@ -6,7 +6,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
 
-class ColorTracker(Node):
+class SphereTracker(Node):
 
     def __init__(self):
         super().__init__('color_tracker')
