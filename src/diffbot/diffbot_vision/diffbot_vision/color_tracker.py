@@ -193,7 +193,6 @@ def predict_red_mask(image):
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
 
     return (probability[:, 0] > 0.75).reshape(h, w)
-
 class ColorTracker(Node):
     def __init__(self):
         super().__init__('color_tracker')
