@@ -337,32 +337,39 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
-    # 1. 赤色データの生成 (Rが高く、GとBが低い、明るさも考慮)
-    r = rng.uniform(0.6, 1.0, n)
-    g = rng.uniform(0.0, 0.3, n)
-    b = rng.uniform(0.0, 0.3, n)
+    # 1. 赤色データの生成 (Rが高く、GとBが低い純粋な赤)
+    r = rng.uniform(0.65, 1.0, n)
+    g = rng.uniform(0.0, 0.25, n)
+    b = rng.uniform(0.0, 0.25, n)
     brightness = rng.uniform(0.35, 1.0, n)
 
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
-    # 2. 非赤色データの生成 (黒・暗い背景、白、青、緑、グレーなど)
-    # 暗い背景（RGBが全体的に低い）を大量に含めて誤検知を防ぐ
+    # 2. 非赤色データの生成 (青、緑、黒、白、グレーなど、あらゆる非赤色を徹底的に学習)
     non_red_list = []
     
-    # 黒・暗い背景専用のサンプル
-    dark_samples = rng.uniform(0.0, 0.15, (n // 2, 3))
+    # 青色のサンプルを多めに追加して青い箱を確実に除外する
+    blue_r = rng.uniform(0.0, 0.3, n // 3)
+    blue_g = rng.uniform(0.0, 0.4, n // 3)
+    blue_b = rng.uniform(0.5, 1.0, n // 3)
+    blue_samples = np.column_stack([blue_r, blue_g, blue_b])
+    non_red_list.append(blue_samples)
+
+    # 黒・暗い背景
+    dark_samples = rng.uniform(0.0, 0.15, (n // 3, 3))
     non_red_list.append(dark_samples)
 
-    # その他のランダムな色（青、緑、白、黄など）
+    # その他のランダムな色
     while sum(len(v) for v in non_red_list) < n:
         samples = rng.uniform(0, 1, (n, 3))
+        # 厳密な赤の条件に当てはまらないものはすべて非赤色
         is_red_condition = (
-            (samples[:, 0] > 0.5) &
-            (samples[:, 0] > samples[:, 1] * 1.3) &
-            (samples[:, 0] > samples[:, 2] * 1.3) &
-            (samples[:, 1] < 0.35) &
-            (samples[:, 2] < 0.35)
+            (samples[:, 0] > 0.6) &
+            (samples[:, 0] > samples[:, 1] * 1.5) &
+            (samples[:, 0] > samples[:, 2] * 1.5) &
+            (samples[:, 1] < 0.3) &
+            (samples[:, 2] < 0.3)
         )
         non_red_list.append(samples[~is_red_condition])
 
@@ -380,10 +387,10 @@ def make_ai_model():
     w1 = rng.normal(0, 0.5, (3, 10)).astype(np.float32)
     b1 = np.zeros((1, 10), dtype=np.float32)
     w2 = rng.normal(0, 0.5, (10, 1)).astype(np.float32)
-    b2 = np.full((1, 1), -1.5, dtype=np.float32)  # 初期バイアスを負にして厳しめに判定
+    b2 = np.full((1, 1), -2.0, dtype=np.float32)  # 初期バイアスをさらに負にして厳しく判定
 
     # 4. 学習ループ
-    for _ in range(250):
+    for _ in range(300):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
         output = sigmoid(h1 @ w2 + b2)
@@ -417,7 +424,8 @@ def predict_red_mask(image):
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
 
-    return (probability[:, 0] > 0.5).reshape(h, w)
+    # 閾値を 0.85 に引き上げ、青やその他の色を完全に無視して純粋な赤だけを検出する
+    return (probability[:, 0] > 0.85).reshape(h, w)
 
 
 class ColorTracker(Node):
@@ -433,7 +441,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started with improved AI model')
+        self.get_logger().info('ColorTracker started with strict red AI model')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -446,7 +454,7 @@ class ColorTracker(Node):
 
         red_mask = predict_red_mask(arr)
         
-        # デバッグログ：暗い背景が正しく `Red=0` になっているか確認
+        # デバッグログ：青い箱を見ているときに Red=0 になっているか確認
         if self._frame_count % 30 == 0:
             points = [
                 (h // 2, w // 2),
@@ -485,14 +493,14 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 閾値を `0.20`（20%）に引き上げ、もっとギリギリまで近づくように調整
-                if area_frac >= 0.20:
+                # 赤い箱に十分接近したら（面積が 15% 以上になったら）RETREAT（後退）へ移行
+                if area_frac >= 0.15:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.12
                 else:
                     twist.linear.x = max(
-                        0.05, 0.3 * (1.0 - area_frac * 4)
+                        0.05, 0.3 * (1.0 - area_frac * 5)
                     )
                     twist.angular.z = -0.8 * offset
 
