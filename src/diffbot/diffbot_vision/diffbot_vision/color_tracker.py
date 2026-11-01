@@ -144,6 +144,7 @@ class ColorTracker(Node):
         #     (arr[:, :, 2] < 95)
         # )
         red_mask = predict_red_mask(arr)
+        
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
