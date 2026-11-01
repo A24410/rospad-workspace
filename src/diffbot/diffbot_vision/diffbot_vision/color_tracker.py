@@ -308,6 +308,14 @@ class SphereTracker(Node):
             else:
                 self.hits = 0
             if self.hits >= 2:
+                self.get_logger().info(
+                    f'FOUND fill={target["fill"]:.2f} '
+                    f'corner={target["corner"]:.2f} '
+                    f'aspect={target["aspect"]:.2f} '
+                    f'area={target["area"]*100:.1f}% '
+                    f'offset={(target["cx"] - w / 2.0) / (w / 2.0):+.2f} '
+                    f'P={target["prob"]:.2f}'
+                )
                 self.set_state('APPROACH', 'sphere found')
 
         elif self.state == 'APPROACH':
