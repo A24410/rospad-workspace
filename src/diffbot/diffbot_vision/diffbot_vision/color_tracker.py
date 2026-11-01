@@ -322,9 +322,9 @@ class SphereTracker(Node):
                 self.set_state('RETREAT', 'wiggle done')
 
         elif self.state == 'RETREAT':
-            twist.linear.x = -0.15
+            twist.linear.x = RETREAT_SPEED
             self.state_count += 1
-            if self.state_count >= 15:
+            if self.state_count >= RETREAT_FRAMES:
                 self.set_state('TURN', 'retreat done')
 
         elif self.state == 'TURN':
