@@ -321,3 +321,218 @@
 # if __name__ == '__main__':
 #     main()
 #**********************************************************
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
+
+# --- AI model ---
+def sigmoid(x):
+    x = np.clip(x, -30, 30)
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def make_ai_model():
+    rng = np.random.default_rng(42)
+    n = 4000
+
+    # 1. 赤色データ
+    r = rng.uniform(0.6, 1.0, n)
+    g = rng.uniform(0.0, 0.2, n)
+    b = rng.uniform(0.0, 0.2, n)
+    brightness = rng.uniform(0.4, 1.0, n)
+    red = np.column_stack([r, g, b]) * brightness[:, None]
+    red = np.clip(red, 0, 1)
+
+    # 2. 非赤色データ（青、黒、緑、白、背景など）を厳しく大量に学習
+    non_red_list = []
+    
+    # 青色サンプルを大量に
+    blue_r = rng.uniform(0.0, 0.2, n // 2)
+    blue_g = rng.uniform(0.0, 0.4, n // 2)
+    blue_b = rng.uniform(0.5, 1.0, n // 2)
+    non_red_list.append(np.column_stack([blue_r, blue_g, blue_b]))
+
+    # 黒・暗い背景
+    non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3)))
+
+    while sum(len(v) for v in non_red_list) < n:
+        samples = rng.uniform(0, 1, (n, 3))
+        is_red = (samples[:, 0] > 0.5) & (samples[:, 1] < 0.25) & (samples[:, 2] < 0.25)
+        non_red_list.append(samples[~is_red])
+
+    non_red = np.concatenate(non_red_list)[:n]
+
+    x = np.vstack([red, non_red]).astype(np.float32)
+    y = np.concatenate([np.ones(n), np.zeros(n)]).reshape(-1, 1).astype(np.float32)
+
+    order = rng.permutation(len(x))
+    x, y = x[order], y[order]
+
+    # ネットワーク構造（隠れ層を少し増やして表現力を上げる）
+    w1 = rng.normal(0, 0.3, (3, 12)).astype(np.float32)
+    b1 = np.zeros((1, 12), dtype=np.float32)
+    w2 = rng.normal(0, 0.3, (12, 1)).astype(np.float32)
+    b2 = np.full((1, 1), -1.5, dtype=np.float32)
+
+    # 学習ループ
+    for _ in range(300):
+        z1 = x @ w1 + b1
+        h1 = np.maximum(0, z1)
+        output = sigmoid(h1 @ w2 + b2)
+
+        dz2 = output - y
+        dw2 = h1.T @ dz2 / len(x)
+        db2 = np.mean(dz2, axis=0, keepdims=True)
+
+        dz1 = (dz2 @ w2.T) * (z1 > 0)
+        dw1 = x.T @ dz1 / len(x)
+        db1 = np.mean(dz1, axis=0, keepdims=True)
+
+        w1 -= 0.3 * dw1
+        b1 -= 0.3 * db1
+        w2 -= 0.3 * dw2
+        b2 -= 0.3 * db2
+
+    accuracy = np.mean((output >= 0.5) == (y >= 0.5))
+    print(f"[AI] Training accuracy: {accuracy * 100:.1f}%")
+
+    return w1, b1, w2, b2
+
+
+AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
+
+
+def predict_red_mask(image):
+    h, w = image.shape[:2]
+    pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
+
+    # 1. AIモデル予測
+    hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
+    probability = sigmoid(hidden @ AI_W2 + AI_B2)
+    ai_mask = (probability[:, 0] > 0.7).reshape(h, w)
+
+    # 2. 物理・色彩による絶対防壁（青・緑・白を完全シャットアウト）
+    r = image[:, :, 0].astype(np.float32)
+    g = image[:, :, 1].astype(np.float32)
+    b = image[:, :, 2].astype(np.float32)
+
+    # 「赤が一番強い色であり、青や緑より明らかに勝っており、暗すぎない」という条件
+    is_pure_red = (r > g * 1.3) & (r > b * 1.3) & (r > 50)
+
+    return ai_mask & is_pure_red
+
+
+class ColorTracker(Node):
+    def __init__(self):
+        super().__init__('color_tracker')
+
+        self._sub = self.create_subscription(
+            Image, '/camera/image_raw', self._on_image, 10
+        )
+        self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        self.state = 'SEARCH'
+        self.state_count = 0
+        self._frame_count = 0
+
+        self.get_logger().info('ColorTracker started (Strict Red Only mode)')
+
+    def _on_image(self, msg):
+        w, h = msg.width, msg.height
+        if w == 0 or h == 0:
+            return
+
+        arr = np.asarray(
+            list(msg.data), dtype=np.uint8
+        ).reshape(h, w, 3)
+
+        red_mask = predict_red_mask(arr)
+        
+        red_count = int(np.sum(red_mask))
+        area_frac = red_count / (w * h)
+
+        # 診断用：APPROACH中に「何色のピクセルを見ているか」をログ出力
+        if self.state == 'APPROACH' and self._frame_count % 15 == 0 and red_count > 0:
+            ys, xs = np.where(red_mask)
+            # 検出された領域の中心あたりのRGBをサンプリング
+            cy_m, cx_m = int(np.mean(ys)), int(np.mean(xs))
+            sampled_rgb = arr[cy_m, cx_m].tolist()
+            print(f"[TARGET DEBUG] Center of detected red blob RGB = {sampled_rgb} (Count: {red_count})")
+
+        twist = Twist()
+
+        # SEARCH
+        if self.state == 'SEARCH':
+            twist.angular.z = 0.7
+
+            if red_count >= 25:
+                self.state = 'APPROACH'
+                self.state_count = 0
+
+        # APPROACH
+        elif self.state == 'APPROACH':
+            if red_count < 10:
+                self.state = 'SEARCH'
+                twist.angular.z = 0.7
+            else:
+                ys, xs = np.where(red_mask)
+                cx = float(np.mean(xs))
+                offset = (cx - w / 2.0) / (w / 2.0)
+
+                if area_frac >= 0.12:
+                    self.state = 'RETREAT'
+                    self.state_count = 0
+                    twist.linear.x = -0.25
+                else:
+                    twist.linear.x = max(0.1, 0.5 * (1.0 - area_frac * 4))
+                    twist.angular.z = -1.0 * offset
+
+        # RETREAT
+        elif self.state == 'RETREAT':
+            twist.linear.x = -0.25
+            self.state_count += 1
+
+            if self.state_count >= 12:
+                self.state = 'TURN'
+                self.state_count = 0
+
+        # TURN
+        elif self.state == 'TURN':
+            twist.angular.z = -0.7
+            self.state_count += 1
+
+            if self.state_count >= 12:
+                self.state = 'SEARCH'
+                self.state_count = 0
+
+        self._pub.publish(twist)
+
+        if self._frame_count % 10 == 0:
+            self.get_logger().info(
+                f'State={self.state} '
+                f'Red={red_count} '
+                f'Area={area_frac * 100:.1f}%'
+            )
+
+        self._frame_count += 1
+
+
+def main():
+    rclpy.init()
+    node = ColorTracker()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node._pub.publish(Twist())
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
