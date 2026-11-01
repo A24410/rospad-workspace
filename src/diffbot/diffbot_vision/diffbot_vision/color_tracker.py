@@ -327,7 +327,22 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 
+# ============================================================
+# 設定
+# ============================================================
+# 青い箱に寄る場合は True にしてみてください。
+# 赤い箱に寄らなくなったら False に戻します。
+SWAP_RB = False
 
+# SEARCH -> APPROACH に入るのに必要な赤ピクセル数
+ENTER_APPROACH_PIXELS = 100
+# APPROACH 中にこれ未満になったら SEARCH に戻る
+LOSE_TARGET_PIXELS = 30
+
+
+# ============================================================
+# 2層ニューラルネットワーク (AIモデル)
+# ============================================================
 def sigmoid(x):
     x = np.clip(x, -30, 30)
     return 1.0 / (1.0 + np.exp(-x))
@@ -349,7 +364,7 @@ def make_ai_model():
     b = r * rng.uniform(0.0, 0.35, n)
     red = np.column_stack([r, g, b])
 
-    # --- 非赤(負例): 一様乱数から赤を除外 + 青/緑/白/黒を明示的に追加 ---
+    # --- 非赤(負例): 一様乱数から赤を除外 + 青/緑/灰色を明示的に追加 ---
     uni = rng.uniform(0.0, 1.0, (n * 3, 3))
     uni = uni[~is_red_rule(uni)][: n // 2]
 
@@ -416,6 +431,9 @@ def predict_red_mask(rgb_image):
     return (prob[:, 0] > 0.6).reshape(h, w)
 
 
+# ============================================================
+# 画像変換
+# ============================================================
 def image_msg_to_rgb(msg):
     """Imageメッセージ -> RGB配列。BGR/RGB, step のパディングに対応"""
     h, w = msg.height, msg.width
@@ -435,6 +453,9 @@ def image_msg_to_rgb(msg):
     return None
 
 
+# ============================================================
+# ノード
+# ============================================================
 class ColorTracker(Node):
     def __init__(self):
         super().__init__('color_tracker')
@@ -448,7 +469,7 @@ class ColorTracker(Node):
         self._frame_count = 0
         self._logged_encoding = False
 
-        self.get_logger().info('ColorTracker started')
+        self.get_logger().info(f'ColorTracker started (SWAP_RB={SWAP_RB})')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -464,20 +485,31 @@ class ColorTracker(Node):
             self.get_logger().warn(f'unsupported encoding: {msg.encoding}')
             return
 
+        # encoding の申告が信用できない場合の強制反転スイッチ
+        if SWAP_RB:
+            arr = np.ascontiguousarray(arr[:, :, ::-1])
+
         red_mask = predict_red_mask(arr)
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
+
+        # デバッグ: 「赤」と判定された領域の平均ピクセル値
+        if red_count > 0 and self._frame_count % 10 == 0:
+            m = arr[red_mask].mean(axis=0)
+            self.get_logger().info(
+                f'detected mean ch0={m[0]:.0f} ch1={m[1]:.0f} ch2={m[2]:.0f}'
+            )
 
         twist = Twist()
 
         if self.state == 'SEARCH':
             twist.angular.z = 0.6
-            if red_count >= 15:
+            if red_count >= ENTER_APPROACH_PIXELS:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
         elif self.state == 'APPROACH':
-            if red_count < 8:
+            if red_count < LOSE_TARGET_PIXELS:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.6
             else:
