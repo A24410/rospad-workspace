@@ -10,7 +10,7 @@ from geometry_msgs.msg import Twist
 SCALE = 3
 THRESHOLD = 22
 MIN_AREA = 12
-SPHERE_PROB = 0.6
+SPHERE_PROB = 0.７
 KEEP_PROB = 0.3           # 追跡中のしきい値
 RETREAT_AREA = 0.09       # これ以上の面積で「到着」(大きいほど近くで止まる)
 
