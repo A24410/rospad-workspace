@@ -138,11 +138,11 @@ class ColorTracker(Node):
         ).reshape(h, w, 3)
 
         # 赤色領域を検出
-        red_mask = (
-            (arr[:, :, 0] > 70) &
-            (arr[:, :, 1] < 95) &
-            (arr[:, :, 2] < 95)
-        )
+        # red_mask = (
+        #     (arr[:, :, 0] > 70) &
+        #     (arr[:, :, 1] < 95) &
+        #     (arr[:, :, 2] < 95)
+        # )
 
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
