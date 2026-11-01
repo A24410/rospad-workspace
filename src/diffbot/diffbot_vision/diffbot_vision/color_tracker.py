@@ -7,27 +7,34 @@ from geometry_msgs.msg import Twist
 # ============================================================
 # 設定
 # ============================================================
-SCALE = 3
-THRESHOLD = 22
-MIN_AREA = 12
-SPHERE_PROB = 0.
-KEEP_PROB = 0.3           # 追跡中のしきい値
+# True: ロボットは動かず、検出した塊の特徴値だけを出力する (データ収集用)
+# False: 通常の動作
+COLLECT_MODE = False
+
+SCALE = 3                 # 画像の間引き (大きいほど速いが粗い)
+THRESHOLD = 22            # 背景との明るさの差
+MIN_AREA = 12             # 小さすぎる塊を無視 (間引き後の画素数)
+SPHERE_PROB = 0.7         # 見つけるときのしきい値
+KEEP_PROB = 0.4           # 追跡中のしきい値
 RETREAT_AREA = 0.09       # これ以上の面積で「到着」(大きいほど近くで止まる)
-
-# 後退の量 (短く・ゆっくりにすると、離れすぎない)
-RETREAT_FRAMES = 5        # 後退するフレーム数
-RETREAT_SPEED = -0.10     # 後退の速さ
-
 NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到着」とみなす
 LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数
+
+# 箱らしい塊を除外する足切り (球体は充填率が低く、四隅が空く)
+VETO_FILL = 0.88          # 充填率がこれを超えたら箱とみなす
+VETO_CORNER = 0.70        # 四隅の充填率がこれを超えたら箱とみなす
 
 # 旋回の向き。球体が画面の端へ逃げていくなら -1.0 にする
 STEER_SIGN = 1.0
 STEER_GAIN = 0.9
 
+# 後退の量
+RETREAT_FRAMES = 5        # 後退するフレーム数 (0にすると後退なし)
+RETREAT_SPEED = -0.10     # 後退の速さ
+
 # 「ここにあるよ〜」のプルプル動作
 WIGGLE_FRAMES = 30        # プルプルする長さ (フレーム数)
-WIGGLE_PERIOD = 3         # 何フレームごとに向きを反転するか (小さいほど細かく震える)
+WIGGLE_PERIOD = 3         # 何フレームごとに向きを反転するか
 WIGGLE_SPEED = 0.9        # 震える強さ (角速度)
 
 
@@ -175,194 +182,3 @@ def detect_blobs(rgb):
                 ys.append(cy)
                 for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     ny, nx = cy + dy, cx + dx
-                    if (0 <= ny < sh and 0 <= nx < sw
-                            and mask[ny, nx] and not visited[ny, nx]):
-                        visited[ny, nx] = True
-                        stack.append((ny, nx))
-
-            area = len(xs)
-            if area < MIN_AREA:
-                continue
-
-            min_x, max_x = min(xs), max(xs)
-            min_y, max_y = min(ys), max(ys)
-            bw_ = max_x - min_x + 1
-            bh_ = max_y - min_y + 1
-
-            crop = np.zeros((bh_, bw_), dtype=bool)
-            crop[np.array(ys) - min_y, np.array(xs) - min_x] = True
-
-            fill = area / (bw_ * bh_)
-            corner = corner_fill_ratio(crop)
-            aspect = bw_ / bh_
-            prob = sphere_probability(fill, corner, aspect)
-
-            blobs.append({
-                'cx': float(np.mean(xs) * SCALE),
-                'area': area * SCALE * SCALE / (h * w),
-                'fill': fill,
-                'corner': corner,
-                'aspect': aspect,
-                'prob': prob,
-            })
-
-    return blobs
-
-
-# ============================================================
-# ノード
-# ============================================================
-class SphereTracker(Node):
-    def __init__(self):
-        super().__init__('sphere_tracker')
-        self._sub = self.create_subscription(
-            Image, '/camera/image_raw', self._on_image, 10
-        )
-        self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
-
-        self.state = 'SEARCH'
-        self.state_count = 0
-        self.frame_count = 0
-        self.hits = 0
-        self.lost = 0
-        self.last_cx = None
-        self.last_offset = 0.0
-        self.last_area = 0.0
-
-        self.get_logger().info('SphereTracker started')
-
-    def set_state(self, new_state, reason):
-        self.get_logger().info(
-            f'STATE {self.state} -> {new_state} ({reason})'
-        )
-        self.state = new_state
-        self.state_count = 0
-        self.hits = 0
-        self.lost = 0
-
-    def steer(self, offset):
-        """球体を画面中央に寄せる旋回指令"""
-        return STEER_SIGN * STEER_GAIN * offset
-
-    def _on_image(self, msg):
-        w, h = msg.width, msg.height
-        if w == 0 or h == 0:
-            return
-
-        rgb = image_msg_to_rgb(msg)
-        if rgb is None:
-            self.get_logger().warn(f'unsupported encoding: {msg.encoding}')
-            return
-
-        if self.last_cx is None:
-            self.last_cx = w / 2.0
-
-        blobs = detect_blobs(rgb)
-
-        # 追跡中はしきい値を下げ、前回の位置に近い球体を選ぶ
-        tracking = (self.state == 'APPROACH')
-        min_prob = KEEP_PROB if tracking else SPHERE_PROB
-        cands = [b for b in blobs if b['prob'] >= min_prob]
-
-        target = None
-        if cands:
-            if tracking:
-                target = min(cands, key=lambda b: abs(b['cx'] - self.last_cx))
-            else:
-                target = max(cands, key=lambda b: b['area'])
-
-        twist = Twist()
-
-        if self.state == 'SEARCH':
-            twist.angular.z = 0.35
-            if target is not None:
-                self.hits += 1
-            else:
-                self.hits = 0
-            if self.hits >= 2:
-                self.set_state('APPROACH', 'sphere found')
-
-        elif self.state == 'APPROACH':
-            if target is not None:
-                self.lost = 0
-                offset = (target['cx'] - w / 2.0) / (w / 2.0)
-                self.last_offset = offset
-                self.last_cx = target['cx']
-                self.last_area = target['area']
-
-                if target['area'] >= RETREAT_AREA:
-                    self.set_state(
-                        'WIGGLE',
-                        f'arrived area={target["area"]*100:.1f}%'
-                    )
-                else:
-                    twist.linear.x = max(0.06, 0.3 * (1.0 - target['area'] * 4))
-                    twist.angular.z = self.steer(offset)
-            else:
-                self.lost += 1
-                if self.lost >= LOST_LIMIT:
-                    if self.last_area >= NEAR_AREA:
-                        self.set_state(
-                            'WIGGLE',
-                            f'lost while near area={self.last_area*100:.1f}%'
-                        )
-                    else:
-                        self.set_state('SEARCH', 'lost while far')
-                else:
-                    # 見失った直後は、最後に見えた方向へゆっくり進む
-                    twist.linear.x = 0.05
-                    twist.angular.z = self.steer(self.last_offset)
-
-        elif self.state == 'WIGGLE':
-            # その場で左右に小刻みに首を振る (「ここにあるよ〜」)
-            direction = 1.0 if (self.state_count // WIGGLE_PERIOD) % 2 == 0 else -1.0
-            twist.angular.z = direction * WIGGLE_SPEED
-            self.state_count += 1
-            if self.state_count >= WIGGLE_FRAMES:
-                self.set_state('RETREAT', 'wiggle done')
-
-        elif self.state == 'RETREAT':
-            twist.linear.x = RETREAT_SPEED
-            self.state_count += 1
-            if self.state_count >= RETREAT_FRAMES:
-                self.set_state('TURN', 'retreat done')
-
-        elif self.state == 'TURN':
-            twist.angular.z = -0.4
-            self.state_count += 1
-            if self.state_count >= 15:
-                self.set_state('SEARCH', 'turn done')
-
-        self._pub.publish(twist)
-
-        if self.frame_count % 10 == 0:
-            self.get_logger().info(
-                f'State={self.state} Blobs={len(blobs)} '
-                f'Target={"yes" if target else "no"} lost={self.lost} '
-                f'cmd(x={twist.linear.x:.2f}, z={twist.angular.z:.2f})'
-            )
-            for b in blobs[:5]:
-                off = (b['cx'] - w / 2.0) / (w / 2.0)
-                self.get_logger().info(
-                    f'  blob fill={b["fill"]:.2f} corner={b["corner"]:.2f} '
-                    f'aspect={b["aspect"]:.2f} area={b["area"]*100:.1f}% '
-                    f'offset={off:+.2f} P(sphere)={b["prob"]:.2f}'
-                )
-        self.frame_count += 1
-
-
-def main():
-    rclpy.init()
-    node = SphereTracker()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node._pub.publish(Twist())
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
