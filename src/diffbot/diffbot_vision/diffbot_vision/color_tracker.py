@@ -338,15 +338,15 @@ def make_ai_model():
     n = 4000
 
     r = rng.uniform(0.6, 1.0, n)
-    g = rng.uniform(0.0, 0.2, n)
-    b = rng.uniform(0.0, 0.2, n)
-    brightness = rng.uniform(0.4, 1.0, n)
+    g = rng.uniform(0.0, 0.25, n)
+    b = rng.uniform(0.0, 0.25, n)
+    brightness = rng.uniform(0.35, 1.0, n)
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
     non_red_list = []
     
-    # 青色サンプル
+    # 青色サンプルを徹底学習
     blue_r = rng.uniform(0.0, 0.3, n // 2)
     blue_g = rng.uniform(0.0, 0.4, n // 2)
     blue_b = rng.uniform(0.4, 1.0, n // 2)
@@ -357,7 +357,7 @@ def make_ai_model():
 
     while sum(len(v) for v in non_red_list) < n:
         samples = rng.uniform(0, 1, (n, 3))
-        is_red = (samples[:, 0] > 0.5) & (samples[:, 1] < 0.25) & (samples[:, 2] < 0.25)
+        is_red = (samples[:, 0] > 0.5) & (samples[:, 1] < 0.3) & (samples[:, 2] < 0.3)
         non_red_list.append(samples[~is_red])
 
     non_red = np.concatenate(non_red_list)[:n]
@@ -409,16 +409,13 @@ def predict_red_mask(image):
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
 
-    # 2. 超強力・完全赤色フィルター（暗い背景・黒・青を100%シャットアウト）
+    # 2. 【強力な青ブロックフィルター】青い箱や暗い背景を完全にシャットアウト
     r = image[:, :, 0].astype(np.float32)
     g = image[:, :, 1].astype(np.float32)
     b = image[:, :, 2].astype(np.float32)
 
-    # 条件：
-    # ① 赤が緑・青より圧倒的に強い (1.5倍以上)
-    # ② 明るさがしっかりある (R > 70) ＝ これにより暗い背景や黒い影を完全無視！
-    # ③ 青成分が低く抑えられている (B < 70) ＝ 青い箱を完全に無視！
-    is_pure_red = (r > g * 1.5) & (r > b * 1.5) & (r > 70) & (b < 70)
+    # 赤が緑より強く、かつ「青成分が一定以下（B < 80）」であること
+    is_pure_red = (r > g * 1.3) & (r > 60) & (b < 80)
 
     return ai_mask & is_pure_red
 
@@ -436,7 +433,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started (Final Perfect mode)')
+        self.get_logger().info('ColorTracker started (Close approach & Anti-blue mode)')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -451,12 +448,6 @@ class ColorTracker(Node):
         
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
-
-        if self._frame_count % 15 == 0 and red_count > 0:
-            ys, xs = np.where(red_mask)
-            cy_m, cx_m = int(np.mean(ys)), int(np.mean(xs))
-            sampled_rgb = arr[cy_m, cx_m].tolist()
-            print(f"[DETECTED RED] RGB={sampled_rgb} Count={red_count} Area={area_frac*100:.1f}%")
 
         twist = Twist()
 
@@ -478,13 +469,13 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 面積が 5%（0.05）以上になったら後退する（ログの最大値が約6.7%だったため、これなら確実に後退します）
-                if area_frac >= 0.05:
+                # 画面の 20%（0.20）を占めるまでギリギリまで接近してから後退する
+                if area_frac >= 0.20:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.25
                 else:
-                    twist.linear.x = max(0.1, 0.5 * (1.0 - area_frac * 10))
+                    twist.linear.x = max(0.08, 0.45 * (1.0 - area_frac * 3))
                     twist.angular.z = -1.0 * offset
 
         # RETREAT
