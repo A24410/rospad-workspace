@@ -1,15 +1,16 @@
-import rclpy
-from rclpy.node import Node
+import importlib.util
+import sys
 
+print("Python:", sys.version)
 
-class MyNode(Node):
-    def __init__(self):
-        super().__init__('my_node')
-        self.get_logger().info('Node started!')
+modules = [
+    "numpy", "cv2", "torch", "torchvision",
+    "onnxruntime", "ultralytics", "PIL"
+]
 
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = MyNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+for name in modules:
+    try:
+        available = importlib.util.find_spec(name) is not None
+        print(name, "AVAILABLE" if available else "NOT INSTALLED")
+    except Exception as e:
+        print(name, "ERROR:", e)
