@@ -209,9 +209,21 @@ class SphereTracker(Node):
         self.state_count = 0
         self.frame_count = 0
         self.hits = 0
-        self.misses = 0
+        self.lost = 0
+        self.last_cx = None
+        self.last_offset = 0.0
+        self.last_area = 0.0
 
         self.get_logger().info('SphereTracker started')
+
+    def set_state(self, new_state, reason):
+        self.get_logger().info(
+            f'STATE {self.state} -> {new_state} ({reason})'
+        )
+        self.state = new_state
+        self.state_count = 0
+        self.hits = 0
+        self.lost = 0
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -223,64 +235,85 @@ class SphereTracker(Node):
             self.get_logger().warn(f'unsupported encoding: {msg.encoding}')
             return
 
-        blobs = detect_blobs(rgb)
-        spheres = [b for b in blobs if b['prob'] >= SPHERE_PROB]
-        target = max(spheres, key=lambda b: b['area']) if spheres else None
+        if self.last_cx is None:
+            self.last_cx = w / 2.0
 
-        if target is not None:
-            self.hits += 1
-            self.misses = 0
-        else:
-            self.misses += 1
-            self.hits = 0
+        blobs = detect_blobs(rgb)
+
+        # 追跡中はしきい値を下げ、前回の位置に近い球体を選ぶ
+        tracking = (self.state == 'APPROACH')
+        min_prob = KEEP_PROB if tracking else SPHERE_PROB
+        cands = [b for b in blobs if b['prob'] >= min_prob]
+
+        target = None
+        if cands:
+            if tracking:
+                target = min(cands, key=lambda b: abs(b['cx'] - self.last_cx))
+            else:
+                target = max(cands, key=lambda b: b['area'])
 
         twist = Twist()
 
         if self.state == 'SEARCH':
-            twist.angular.z = 0.4
+            twist.angular.z = 0.35
+            if target is not None:
+                self.hits += 1
+            else:
+                self.hits = 0
             if self.hits >= 2:
-                self.state = 'APPROACH'
-                self.state_count = 0
+                self.set_state('APPROACH', 'sphere found')
 
         elif self.state == 'APPROACH':
-            if self.misses >= 4 or target is None:
-                if self.misses >= 4:
-                    self.state = 'SEARCH'
-                    twist.angular.z = 0.4
-            else:
+            if target is not None:
+                self.lost = 0
                 offset = (target['cx'] - w / 2.0) / (w / 2.0)
+                self.last_offset = offset
+                self.last_cx = target['cx']
+                self.last_area = target['area']
+
                 if target['area'] >= RETREAT_AREA:
-                    self.state = 'RETREAT'
-                    self.state_count = 0
+                    self.set_state(
+                        'RETREAT', f'close enough area={target["area"]*100:.1f}%'
+                    )
                     twist.linear.x = -0.15
                 else:
                     twist.linear.x = max(0.06, 0.3 * (1.0 - target['area'] * 4))
                     twist.angular.z = -0.9 * offset
+            else:
+                self.lost += 1
+                if self.lost >= LOST_LIMIT:
+                    if self.last_area >= NEAR_AREA:
+                        self.set_state(
+                            'RETREAT',
+                            f'lost while near area={self.last_area*100:.1f}%'
+                        )
+                        twist.linear.x = -0.15
+                    else:
+                        self.set_state('SEARCH', 'lost while far')
+                else:
+                    # 見失った直後は、最後に見えた方向へゆっくり進む
+                    twist.linear.x = 0.05
+                    twist.angular.z = -0.9 * self.last_offset
 
         elif self.state == 'RETREAT':
             twist.linear.x = -0.15
             self.state_count += 1
             if self.state_count >= 15:
-                self.state = 'TURN'
-                self.state_count = 0
+                self.set_state('TURN', 'retreat done')
 
         elif self.state == 'TURN':
             twist.angular.z = -0.4
             self.state_count += 1
             if self.state_count >= 15:
-                self.state = 'SEARCH'
-                self.state_count = 0
-                self.hits = 0
-                self.misses = 0
+                self.set_state('SEARCH', 'turn done')
 
         self._pub.publish(twist)
 
-        # 10フレームごとに、検出した塊ごとの特徴をログ出力
         if self.frame_count % 10 == 0:
             self.get_logger().info(
-                f'State={self.state} Blobs={len(blobs)} Spheres={len(spheres)} '
-                f'cmd(x={twist.linear.x:.2f}, z={twist.angular.z:.2f}) '
-                f'stamp={msg.header.stamp.sec}.{msg.header.stamp.nanosec}'
+                f'State={self.state} Blobs={len(blobs)} '
+                f'Target={"yes" if target else "no"} lost={self.lost} '
+                f'cmd(x={twist.linear.x:.2f}, z={twist.angular.z:.2f})'
             )
             for b in blobs[:5]:
                 off = (b['cx'] - w / 2.0) / (w / 2.0)
