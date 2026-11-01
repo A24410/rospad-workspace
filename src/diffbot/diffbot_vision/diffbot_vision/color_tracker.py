@@ -17,12 +17,13 @@ MIN_AREA = 12             # 小さすぎる塊を無視 (間引き後の画素�
 SPHERE_PROB = 0.7         # 見つけるときのしきい値
 KEEP_PROB = 0.4           # 追跡中のしきい値
 RETREAT_AREA = 0.09       # これ以上の面積で「到着」(大きいほど近くで止まる)
-NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到着」とみなす
+NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到着」の候補
+ARRIVE_OFFSET = 0.5       # 見失う直前に、球体がこの範囲(中央付近)にあれば「到着」
 LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数
 
-# 箱らしい塊を除外する足切り (球体は充填率が低く、四隅が空く)
+# 箱らしい塊を除外する足切り (球体は四隅が空く)
 VETO_FILL = 0.88          # 充填率がこれを超えたら箱とみなす
-VETO_CORNER = 0.70        # 四隅の充填率がこれを超えたら箱とみなす
+VETO_CORNER = 0.58        # 四隅の充填率がこれを超えたら箱とみなす
 
 # 旋回の向き。球体が画面の端へ逃げていくなら -1.0 にする
 STEER_SIGN = 1.0
@@ -53,14 +54,20 @@ def make_ai_model():
     # 球体: 実測ログに合わせ、影で横に伸びた形も含める
     sphere = np.column_stack([
         rng.normal(0.74, 0.08, n),
-        rng.normal(0.30, 0.15, n),
+        np.clip(rng.normal(0.28, 0.13, n), 0.0, 0.57),
         rng.normal(1.15, 0.30, n),
     ])
-    # 箱: 充填率が高く、四隅も埋まる
-    box = np.column_stack([
+    # 箱(1): 細い帯状や正面から見た四角 (充填率も四隅も高い)
+    box_flat = np.column_stack([
         rng.normal(0.95, 0.05, n),
-        rng.normal(0.90, 0.08, n),
-        rng.uniform(0.5, 2.0, n),
+        rng.normal(0.92, 0.07, n),
+        rng.uniform(0.03, 4.0, n),
+    ])
+    # 箱(2): 実測ログの直方体 (斜めから見て欠けた形。四隅の値が高い)
+    box_real = np.column_stack([
+        rng.normal(0.73, 0.07, n),
+        rng.normal(0.67, 0.07, n),
+        rng.normal(1.45, 0.35, n),
     ])
     # 欠けた塊 / ノイズ: 充填率が低い
     junk = np.column_stack([
@@ -69,9 +76,9 @@ def make_ai_model():
         rng.uniform(0.3, 3.0, n),
     ])
 
-    x = np.vstack([sphere, box, junk]).astype(np.float32)
+    x = np.vstack([sphere, box_flat, box_real, junk]).astype(np.float32)
     y = np.concatenate([
-        np.ones(n), np.zeros(n), np.zeros(n)
+        np.ones(n), np.zeros(n), np.zeros(n), np.zeros(n)
     ]).reshape(-1, 1).astype(np.float32)
 
     order = rng.permutation(len(x))
@@ -83,7 +90,7 @@ def make_ai_model():
     b2 = np.zeros((1, 1), dtype=np.float32)
 
     lr = 0.5
-    for _ in range(2500):
+    for _ in range(3000):
         z1 = x @ w1 + b1
         h1 = np.maximum(0, z1)
         out = sigmoid(h1 @ w2 + b2)
@@ -337,16 +344,23 @@ class SphereTracker(Node):
             else:
                 self.lost += 1
                 if self.lost >= LOST_LIMIT:
-                    if self.last_area >= NEAR_AREA:
+                    centered = abs(self.last_offset) < ARRIVE_OFFSET
+                    if self.last_area >= NEAR_AREA and centered:
                         self.set_state(
                             'WIGGLE',
-                            f'lost while near area={self.last_area*100:.1f}%'
+                            f'lost while near area={self.last_area*100:.1f}% '
+                            f'offset={self.last_offset:+.2f}'
                         )
                     else:
-                        self.set_state('SEARCH', 'lost while far')
+                        self.set_state(
+                            'SEARCH',
+                            f'lost (area={self.last_area*100:.1f}% '
+                            f'offset={self.last_offset:+.2f})'
+                        )
                 else:
-                    # 見失った直後は、最後に見えた方向へゆっくり進む
-                    twist.linear.x = 0.05
+                    # 見失った直後: 中央付近なら少しだけ進み、向きは最後の方向へ
+                    if abs(self.last_offset) < 0.4:
+                        twist.linear.x = 0.05
                     twist.angular.z = self.steer(self.last_offset)
 
         elif self.state == 'WIGGLE':
