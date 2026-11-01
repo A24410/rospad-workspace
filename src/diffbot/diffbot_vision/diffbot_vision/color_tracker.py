@@ -337,6 +337,7 @@ def make_ai_model():
     rng = np.random.default_rng(42)
     n = 4000
 
+    # 1. 赤色のトレーニングデータ（RGB順）
     r = rng.uniform(0.65, 1.0, n)
     g = rng.uniform(0.0, 0.2, n)
     b = rng.uniform(0.0, 0.2, n)
@@ -344,8 +345,8 @@ def make_ai_model():
     red = np.column_stack([r, g, b]) * brightness[:, None]
     red = np.clip(red, 0, 1)
 
+    # 2. 非赤色（青、緑、黒など）
     non_red_list = []
-    # あらゆる非赤色を広く学習
     non_red_list.append(rng.uniform(0.0, 1.0, (n // 2, 3)))
     non_red_list.append(rng.uniform(0.0, 0.2, (n // 2, 3)))
     non_red = np.concatenate(non_red_list)[:n]
@@ -387,13 +388,18 @@ AI_W1, AI_B1, AI_W2, AI_B2 = make_ai_model()
 
 def predict_red_mask(image):
     h, w = image.shape[:2]
-    pixels = image.reshape(-1, 3).astype(np.float32) / 255.0
+
+    # 🚨 【超重要】シミュレータの画像が BGR の場合を考慮し、
+    # AIに入力する前に [R, G, B] の並び（RGB）に正しく変換する
+    # ※ もし元々RGBなら、このスライスは arr[:, :, [0, 1, 2]] に調整してください
+    rgb_image = image[:, :, [2, 1, 0]] 
+
+    pixels = rgb_image.reshape(-1, 3).astype(np.float32) / 255.0
 
     # AIモデルによる予測
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     
-    # 確率 0.65 以上を赤とする
     ai_mask = (probability[:, 0] > 0.65).reshape(h, w)
     return ai_mask
 
@@ -411,7 +417,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker Clean AI Mode started')
+        self.get_logger().info('ColorTracker Channel-Corrected AI Mode started')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -429,7 +435,7 @@ class ColorTracker(Node):
 
         twist = Twist()
 
-        # 1. SEARCH: 赤い箱を探して回転
+        # 1. SEARCH: 探索
         if self.state == 'SEARCH':
             twist.angular.z = 0.6
 
@@ -437,7 +443,7 @@ class ColorTracker(Node):
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # 2. APPROACH: 赤い箱に接近
+        # 2. APPROACH: 接近
         elif self.state == 'APPROACH':
             if red_count < 8:
                 self.state = 'SEARCH'
@@ -447,7 +453,6 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 画面の18%以上を占めたら後退へ
                 if area_frac >= 0.18:
                     self.state = 'RETREAT'
                     self.state_count = 0
