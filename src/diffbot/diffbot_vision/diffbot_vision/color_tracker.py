@@ -12,13 +12,18 @@ THRESHOLD = 22            # 背景との明るさの差
 MIN_AREA = 12             # 小さすぎる塊を無視 (間引き後の画素数)
 SPHERE_PROB = 0.6         # 見つけるときのしきい値
 KEEP_PROB = 0.3           # 追跡中のしきい値
-RETREAT_AREA = 0.05       # これ以上の面積で後退
-NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到達」とみなす
+RETREAT_AREA = 0.05       # これ以上の面積で「到着」
+NEAR_AREA = 0.04          # 見失う直前にこれ以上なら「到着」とみなす
 LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数
 
 # 旋回の向き。球体が画面の端へ逃げていくなら -1.0 にする
-STEER_SIGN = 0
+STEER_SIGN = 1.0
 STEER_GAIN = 0.9
+
+# 「ここにあるよ〜」のプルプル動作
+WIGGLE_FRAMES = 30        # プルプルする長さ (フレーム数)
+WIGGLE_PERIOD = 3         # 何フレームごとに向きを反転するか (小さいほど細かく震える)
+WIGGLE_SPEED = 0.9        # 震える強さ (角速度)
 
 
 # ============================================================
@@ -282,10 +287,9 @@ class SphereTracker(Node):
 
                 if target['area'] >= RETREAT_AREA:
                     self.set_state(
-                        'RETREAT',
-                        f'close enough area={target["area"]*100:.1f}%'
+                        'WIGGLE',
+                        f'arrived area={target["area"]*100:.1f}%'
                     )
-                    twist.linear.x = -0.15
                 else:
                     twist.linear.x = max(0.06, 0.3 * (1.0 - target['area'] * 4))
                     twist.angular.z = self.steer(offset)
@@ -294,16 +298,23 @@ class SphereTracker(Node):
                 if self.lost >= LOST_LIMIT:
                     if self.last_area >= NEAR_AREA:
                         self.set_state(
-                            'RETREAT',
+                            'WIGGLE',
                             f'lost while near area={self.last_area*100:.1f}%'
                         )
-                        twist.linear.x = -0.15
                     else:
                         self.set_state('SEARCH', 'lost while far')
                 else:
                     # 見失った直後は、最後に見えた方向へゆっくり進む
                     twist.linear.x = 0.05
                     twist.angular.z = self.steer(self.last_offset)
+
+        elif self.state == 'WIGGLE':
+            # その場で左右に小刻みに首を振る (「ここにあるよ〜」)
+            direction = 1.0 if (self.state_count // WIGGLE_PERIOD) % 2 == 0 else -1.0
+            twist.angular.z = direction * WIGGLE_SPEED
+            self.state_count += 1
+            if self.state_count >= WIGGLE_FRAMES:
+                self.set_state('RETREAT', 'wiggle done')
 
         elif self.state == 'RETREAT':
             twist.linear.x = -0.15
