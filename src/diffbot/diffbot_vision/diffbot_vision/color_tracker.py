@@ -321,7 +321,6 @@
 # if __name__ == '__main__':
 #     main()
 #**********************************************************
-
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -347,7 +346,7 @@ def make_ai_model():
 
     non_red_list = []
     
-    # 青色サンプルを徹底学習
+    # 青色サンプル
     blue_r = rng.uniform(0.0, 0.3, n // 2)
     blue_g = rng.uniform(0.0, 0.4, n // 2)
     blue_b = rng.uniform(0.4, 1.0, n // 2)
@@ -408,17 +407,18 @@ def predict_red_mask(image):
     # 1. AIモデル予測
     hidden = np.maximum(0, pixels @ AI_W1 + AI_B1)
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
-    ai_mask = (probability[:, 0] > 0.65).reshape(h, w)
+    ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
 
-    # 2. 物理・色彩による絶対防壁（青箱を完全に排除）
+    # 2. 超強力・完全赤色フィルター（暗い背景・黒・青を100%シャットアウト）
     r = image[:, :, 0].astype(np.float32)
     g = image[:, :, 1].astype(np.float32)
     b = image[:, :, 2].astype(np.float32)
 
     # 条件：
-    # ① 赤が緑や青より十分に強いこと
-    # ② 青成分（B）が一定値（例: 80）以上のピクセルは、青い箱の可能性が高いので強制的に除外！
-    is_pure_red = (r > g * 1.3) & (r > b * 1.4) & (r > 60) & (b < 80)
+    # ① 赤が緑・青より圧倒的に強い (1.5倍以上)
+    # ② 明るさがしっかりある (R > 70) ＝ これにより暗い背景や黒い影を完全無視！
+    # ③ 青成分が低く抑えられている (B < 70) ＝ 青い箱を完全に無視！
+    is_pure_red = (r > g * 1.5) & (r > b * 1.5) & (r > 70) & (b < 70)
 
     return ai_mask & is_pure_red
 
@@ -436,7 +436,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started (Anti-Blue absolute mode)')
+        self.get_logger().info('ColorTracker started (Final Perfect mode)')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -452,7 +452,6 @@ class ColorTracker(Node):
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
-        # 診断用ログ：現在検知しているもののRGBを確認
         if self._frame_count % 15 == 0 and red_count > 0:
             ys, xs = np.where(red_mask)
             cy_m, cx_m = int(np.mean(ys)), int(np.mean(xs))
@@ -465,13 +464,13 @@ class ColorTracker(Node):
         if self.state == 'SEARCH':
             twist.angular.z = 0.7
 
-            if red_count >= 20:
+            if red_count >= 15:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
         # APPROACH
         elif self.state == 'APPROACH':
-            if red_count < 10:
+            if red_count < 8:
                 self.state = 'SEARCH'
                 twist.angular.z = 0.7
             else:
@@ -479,13 +478,13 @@ class ColorTracker(Node):
                 cx = float(np.mean(xs))
                 offset = (cx - w / 2.0) / (w / 2.0)
 
-                # 閾値を 0.28（画面の28%）に引き上げ、しっかり近づくまで後退しないようにする
-                if area_frac >= 0.28:
+                # 面積が 5%（0.05）以上になったら後退する（ログの最大値が約6.7%だったため、これなら確実に後退します）
+                if area_frac >= 0.05:
                     self.state = 'RETREAT'
                     self.state_count = 0
                     twist.linear.x = -0.25
                 else:
-                    twist.linear.x = max(0.1, 0.5 * (1.0 - area_frac * 3))
+                    twist.linear.x = max(0.1, 0.5 * (1.0 - area_frac * 10))
                     twist.angular.z = -1.0 * offset
 
         # RETREAT
@@ -512,7 +511,7 @@ class ColorTracker(Node):
             self.get_logger().info(
                 f'State={self.state} '
                 f'Red={red_count} '
-                f'Area={area_frac * 100:.1f}%'
+                f'Area={area_frac*100:.1f}%'
             )
 
         self._frame_count += 1
