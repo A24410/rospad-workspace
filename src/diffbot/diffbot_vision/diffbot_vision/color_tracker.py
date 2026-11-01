@@ -7,11 +7,14 @@ from geometry_msgs.msg import Twist
 # ============================================================
 # 設定
 # ============================================================
+SCALE = 3                 # 画像の間引き (大きいほど速いが粗い)
+THRESHOLD = 22            # 背景との明るさの差
+MIN_AREA = 12             # 小さすぎる塊を無視 (間引き後の画素数)
 SPHERE_PROB = 0.6         # 見つけるときのしきい値
-KEEP_PROB = 0.3           # 追跡中のしきい値 (追加)
-RETREAT_AREA = 0.05       # これ以上の面積で後退 (変更)
-NEAR_AREA = 0.02          # 見失う直前にこれ以上なら「到達」とみなす (追加)
-LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数 (追加)
+KEEP_PROB = 0.3           # 追跡中のしきい値
+RETREAT_AREA = 0.05       # これ以上の面積で後退
+NEAR_AREA = 0.02          # 見失う直前にこれ以上なら「到達」とみなす
+LOST_LIMIT = 12           # 見失っても追跡を続けるフレーム数
 
 
 # ============================================================
@@ -26,21 +29,16 @@ def make_ai_model():
     rng = np.random.default_rng(0)
     n = 3000
 
-    # 球体: 充填率 約0.78, 四隅が空く, ほぼ正方形
     sphere = np.column_stack([
         rng.normal(0.78, 0.06, n),
         rng.normal(0.25, 0.12, n),
         rng.normal(1.0, 0.12, n),
     ])
-
-    # 箱: 充填率が高く, 四隅も埋まる
     box = np.column_stack([
         rng.normal(0.95, 0.05, n),
         rng.normal(0.90, 0.08, n),
         rng.uniform(0.5, 2.0, n),
     ])
-
-    # 欠けた塊 / ノイズ: 充填率が低い
     junk = np.column_stack([
         rng.uniform(0.2, 0.65, n),
         rng.uniform(0.0, 1.0, n),
@@ -273,7 +271,8 @@ class SphereTracker(Node):
 
                 if target['area'] >= RETREAT_AREA:
                     self.set_state(
-                        'RETREAT', f'close enough area={target["area"]*100:.1f}%'
+                        'RETREAT',
+                        f'close enough area={target["area"]*100:.1f}%'
                     )
                     twist.linear.x = -0.15
                 else:
