@@ -347,7 +347,7 @@ def make_ai_model():
 
     non_red_list = []
     
-    # 青色のサンプルを強力に学習
+    # 青色のサンプルを徹底学習
     blue_r = rng.uniform(0.0, 0.3, n // 2)
     blue_g = rng.uniform(0.0, 0.4, n // 2)
     blue_b = rng.uniform(0.4, 1.0, n // 2)
@@ -420,14 +420,15 @@ def predict_red_mask(image):
     probability = sigmoid(hidden @ AI_W2 + AI_B2)
     ai_mask = (probability[:, 0] > 0.6).reshape(h, w)
 
-    # 2. 青色除外ガード（青い箱対策）：
-    # 青成分（B）が赤成分（R）に対して強いピクセル、または青の要素が目立つピクセルは強制的に除外する
+    # 2. 超強力な「完全・赤判定フィルター」（青い箱を100%シャットアウト）
     r_chan = image[:, :, 0].astype(np.float32)
+    g_chan = image[:, :, 1].astype(np.float32)
     b_chan = image[:, :, 2].astype(np.float32)
-    not_blue = (r_chan > b_chan * 1.15) & (b_chan < 120)
 
-    # AIの判定かつ、青くないピクセルのみを「本当の赤」として採用
-    return ai_mask & not_blue
+    # 赤（R）が、緑（G）や青（B）よりも 1.3倍以上強く、かつ明るさが一定以上ある場合のみ「赤」とする
+    is_truly_red = (r_chan > g_chan * 1.3) & (r_chan > b_chan * 1.3) & (r_chan > 60)
+
+    return ai_mask & is_truly_red
 
 
 class ColorTracker(Node):
@@ -443,7 +444,7 @@ class ColorTracker(Node):
         self.state_count = 0
         self._frame_count = 0
 
-        self.get_logger().info('ColorTracker started with AI + Blue-Guard')
+        self.get_logger().info('ColorTracker started (Fast & Anti-Blue mode)')
 
     def _on_image(self, msg):
         w, h = msg.width, msg.height
@@ -456,39 +457,24 @@ class ColorTracker(Node):
 
         red_mask = predict_red_mask(arr)
         
-        if self._frame_count % 30 == 0:
-            points = [
-                (h // 2, w // 2),
-                (h // 4, w // 4),
-                (h // 4, 3 * w // 4),
-                (3 * h // 4, w // 4),
-                (3 * h // 4, 3 * w // 4),
-            ]
-
-            print("[AI DEBUG] RGB / Red prediction")
-            for py, px in points:
-                rgb = arr[py, px].tolist()
-                result = int(red_mask[py, px])
-                print(f"  ({px},{py}) RGB={rgb} Red={result}")
-
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
 
         twist = Twist()
 
-        # SEARCH: 赤い物体を探す
+        # SEARCH: 探索時の回転速度をアップ（0.4 → 0.7）
         if self.state == 'SEARCH':
-            twist.angular.z = 0.4
+            twist.angular.z = 0.7
 
             if red_count >= 20:
                 self.state = 'APPROACH'
                 self.state_count = 0
 
-        # APPROACH: 赤い物体に接近する
+        # APPROACH: 赤い箱に素早く接近する（スピードアップ）
         elif self.state == 'APPROACH':
             if red_count < 10:
                 self.state = 'SEARCH'
-                twist.angular.z = 0.4
+                twist.angular.z = 0.7
             else:
                 ys, xs = np.where(red_mask)
                 cx = float(np.mean(xs))
@@ -497,28 +483,27 @@ class ColorTracker(Node):
                 if area_frac >= 0.12:
                     self.state = 'RETREAT'
                     self.state_count = 0
-                    twist.linear.x = -0.12
+                    twist.linear.x = -0.25  # 後退速度もキビキビと (-0.12 → -0.25)
                 else:
-                    twist.linear.x = max(
-                        0.05, 0.3 * (1.0 - area_frac * 5)
-                    )
-                    twist.angular.z = -0.8 * offset
+                    # 前進スピードをアップ（最大0.5）
+                    twist.linear.x = max(0.1, 0.5 * (1.0 - area_frac * 4))
+                    twist.angular.z = -1.0 * offset  # 舵取りの応答性もアップ
 
-        # RETREAT: 一定時間後退する
+        # RETREAT: 素早く後退する
         elif self.state == 'RETREAT':
-            twist.linear.x = -0.12
+            twist.linear.x = -0.25
             self.state_count += 1
 
-            if self.state_count >= 15:
+            if self.state_count >= 12:  # タイマーを少し短くしてテンポ良く
                 self.state = 'TURN'
                 self.state_count = 0
 
-        # TURN: 向きを変えて再探索する
+        # TURN: 素早く向きを変える
         elif self.state == 'TURN':
-            twist.angular.z = -0.4
+            twist.angular.z = -0.7
             self.state_count += 1
 
-            if self.state_count >= 15:
+            if self.state_count >= 12:
                 self.state = 'SEARCH'
                 self.state_count = 0
 
