@@ -234,11 +234,11 @@ class ColorTracker(Node):
                 (3 * h // 4, 3 * w // 4),
             ]
 
-        print("[AI DEBUG] RGB / Red prediction")
-        for py, px in points:
-            rgb = arr[py, px].tolist()
-            result = int(red_mask[py, px])
-            print(f"  ({px},{py}) RGB={rgb} Red={result}")
+            print("[AI DEBUG] RGB / Red prediction")
+            for py, px in points:
+                rgb = arr[py, px].tolist()
+                result = int(red_mask[py, px])
+                print(f"  ({px},{py}) RGB={rgb} Red={result}")
 
         red_count = int(np.sum(red_mask))
         area_frac = red_count / (w * h)
